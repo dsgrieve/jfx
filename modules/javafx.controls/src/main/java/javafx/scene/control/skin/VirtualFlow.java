@@ -991,9 +991,6 @@ public class VirtualFlow<T extends IndexedCell> extends Region {
             lastWidth = -1;
             lastHeight = -1;
             releaseCell(accumCell);
-            for (int i = 0, max = cells.size(); i < max; i++) {
-                cells.get(i).updateIndex(-1);
-            }
             addAllToPile();
             releaseAllPrivateCells();
         } else if (needsReconfigureCells) {
