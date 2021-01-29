@@ -38,7 +38,6 @@
 #include "WorkerRunLoop.h"
 #include "WorkerGlobalScope.h"
 #include "WorkerThread.h"
-#include <JavaScriptCore/PromiseDeferredTimer.h>
 
 #if USE(GLIB)
 #include <glib.h>

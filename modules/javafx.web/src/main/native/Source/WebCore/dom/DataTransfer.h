@@ -2,7 +2,7 @@
  * Copyright (C) 2001 Peter Kelly (pmk@post.com)
  * Copyright (C) 2001 Tobias Anton (anton@stud.fbi.fh-darmstadt.de)
  * Copyright (C) 2006 Samuel Weinig (sam.weinig@gmail.com)
- * Copyright (C) 2003-2016 Apple Inc. All rights reserved.
+ * Copyright (C) 2003-2020 Apple Inc. All rights reserved.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -26,7 +26,6 @@
 #include "CachedResourceHandle.h"
 #include "DragActions.h"
 #include "DragImage.h"
-#include <pal/SessionID.h>
 #include <wtf/text/WTFString.h>
 
 namespace WebCore {
@@ -40,7 +39,7 @@ class Element;
 class FileList;
 class File;
 class Pasteboard;
-enum class WebContentReadingPolicy;
+enum class WebContentReadingPolicy : bool;
 
 class DataTransfer : public RefCounted<DataTransfer> {
 #if PLATFORM(JAVA)
@@ -51,7 +50,7 @@ public:
     enum class StoreMode { Invalid, ReadWrite, Readonly, Protected };
 
     static Ref<DataTransfer> createForCopyAndPaste(const Document&, StoreMode, std::unique_ptr<Pasteboard>&&);
-    static Ref<DataTransfer> createForInputEvent(const Document&, const String& plainText, const String& htmlText);
+    static Ref<DataTransfer> createForInputEvent(const String& plainText, const String& htmlText);
 
     WEBCORE_EXPORT ~DataTransfer();
 
@@ -63,6 +62,7 @@ public:
 
     DataTransferItemList& items();
     Vector<String> types() const;
+
     Vector<String> typesForItemList() const;
 
     FileList& files() const;
@@ -90,17 +90,17 @@ public:
     void commitToPasteboard(Pasteboard&);
 
 #if ENABLE(DRAG_SUPPORT)
-    static Ref<DataTransfer> createForDrag(const Document&);
+    static Ref<DataTransfer> createForDrag();
     static Ref<DataTransfer> createForDragStartEvent(const Document&);
-    static Ref<DataTransfer> createForDrop(const Document&, std::unique_ptr<Pasteboard>&&, DragOperation, bool draggingFiles);
-    static Ref<DataTransfer> createForUpdatingDropTarget(const Document&, std::unique_ptr<Pasteboard>&&, DragOperation, bool draggingFiles);
+    static Ref<DataTransfer> createForDrop(const Document&, std::unique_ptr<Pasteboard>&&, OptionSet<DragOperation>, bool draggingFiles);
+    static Ref<DataTransfer> createForUpdatingDropTarget(const Document&, std::unique_ptr<Pasteboard>&&, OptionSet<DragOperation>, bool draggingFiles);
 
     bool dropEffectIsUninitialized() const { return m_dropEffect == "uninitialized"; }
 
-    DragOperation sourceOperation() const;
-    DragOperation destinationOperation() const;
-    void setSourceOperation(DragOperation);
-    void setDestinationOperation(DragOperation);
+    OptionSet<DragOperation> sourceOperationMask() const;
+    OptionSet<DragOperation> destinationOperationMask() const;
+    void setSourceOperationMask(OptionSet<DragOperation>);
+    void setDestinationOperationMask(OptionSet<DragOperation>);
 
     void setDragHasStarted() { m_shouldUpdateDragImage = true; }
     DragImageRef createDragImage(IntPoint& dragLocation) const;
@@ -121,7 +121,7 @@ public:
 
 private:
     enum class Type { CopyAndPaste, DragAndDropData, DragAndDropFiles, InputEvent };
-    DataTransfer(const Document&, StoreMode, std::unique_ptr<Pasteboard>, Type = Type::CopyAndPaste);
+    DataTransfer(StoreMode, std::unique_ptr<Pasteboard>, Type = Type::CopyAndPaste);
 
 #if ENABLE(DRAG_SUPPORT)
     bool forDrag() const { return m_type == Type::DragAndDropData || m_type == Type::DragAndDropFiles; }
@@ -138,7 +138,6 @@ private:
     Vector<String> types(AddFilesType) const;
     Vector<Ref<File>> filesFromPasteboardAndItemList() const;
 
-    PAL::SessionID m_sessionID;
     String m_originIdentifier;
     StoreMode m_storeMode;
     std::unique_ptr<Pasteboard> m_pasteboard;

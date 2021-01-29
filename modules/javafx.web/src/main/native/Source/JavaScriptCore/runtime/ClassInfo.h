@@ -22,7 +22,6 @@
 
 #pragma once
 
-#include "CallFrame.h"
 #include "ConstructData.h"
 #include "JSCast.h"
 #include <wtf/PtrTag.h>
@@ -48,49 +47,49 @@ struct MethodTable {
     using VisitChildrenFunctionPtr = void (*)(JSCell*, SlotVisitor&);
     VisitChildrenFunctionPtr METHOD_TABLE_ENTRY(visitChildren);
 
-    using GetCallDataFunctionPtr = CallType (*)(JSCell*, CallData&);
+    using GetCallDataFunctionPtr = CallData (*)(JSCell*);
     GetCallDataFunctionPtr METHOD_TABLE_ENTRY(getCallData);
 
-    using GetConstructDataFunctionPtr = ConstructType (*)(JSCell*, ConstructData&);
+    using GetConstructDataFunctionPtr = CallData (*)(JSCell*);
     GetConstructDataFunctionPtr METHOD_TABLE_ENTRY(getConstructData);
 
-    using PutFunctionPtr = bool (*)(JSCell*, ExecState*, PropertyName propertyName, JSValue, PutPropertySlot&);
+    using PutFunctionPtr = bool (*)(JSCell*, JSGlobalObject*, PropertyName propertyName, JSValue, PutPropertySlot&);
     PutFunctionPtr METHOD_TABLE_ENTRY(put);
 
-    using PutByIndexFunctionPtr = bool (*)(JSCell*, ExecState*, unsigned propertyName, JSValue, bool shouldThrow);
+    using PutByIndexFunctionPtr = bool (*)(JSCell*, JSGlobalObject*, unsigned propertyName, JSValue, bool shouldThrow);
     PutByIndexFunctionPtr METHOD_TABLE_ENTRY(putByIndex);
 
-    using DeletePropertyFunctionPtr = bool (*)(JSCell*, ExecState*, PropertyName);
+    using DeletePropertyFunctionPtr = bool (*)(JSCell*, JSGlobalObject*, PropertyName, DeletePropertySlot&);
     DeletePropertyFunctionPtr METHOD_TABLE_ENTRY(deleteProperty);
 
-    using DeletePropertyByIndexFunctionPtr = bool (*)(JSCell*, ExecState*, unsigned);
+    using DeletePropertyByIndexFunctionPtr = bool (*)(JSCell*, JSGlobalObject*, unsigned);
     DeletePropertyByIndexFunctionPtr METHOD_TABLE_ENTRY(deletePropertyByIndex);
 
-    using GetOwnPropertySlotFunctionPtr = bool (*)(JSObject*, ExecState*, PropertyName, PropertySlot&);
+    using GetOwnPropertySlotFunctionPtr = bool (*)(JSObject*, JSGlobalObject*, PropertyName, PropertySlot&);
     GetOwnPropertySlotFunctionPtr METHOD_TABLE_ENTRY(getOwnPropertySlot);
 
-    using GetOwnPropertySlotByIndexFunctionPtr = bool (*)(JSObject*, ExecState*, unsigned, PropertySlot&);
+    using GetOwnPropertySlotByIndexFunctionPtr = bool (*)(JSObject*, JSGlobalObject*, unsigned, PropertySlot&);
     GetOwnPropertySlotByIndexFunctionPtr METHOD_TABLE_ENTRY(getOwnPropertySlotByIndex);
 
-    using DoPutPropertySecurityCheckFunctionPtr = void (*)(JSObject*, ExecState*, PropertyName, PutPropertySlot&);
+    using DoPutPropertySecurityCheckFunctionPtr = void (*)(JSObject*, JSGlobalObject*, PropertyName, PutPropertySlot&);
     DoPutPropertySecurityCheckFunctionPtr METHOD_TABLE_ENTRY(doPutPropertySecurityCheck);
 
-    using ToThisFunctionPtr = JSValue (*)(JSCell*, ExecState*, ECMAMode);
+    using ToThisFunctionPtr = JSValue (*)(JSCell*, JSGlobalObject*, ECMAMode);
     ToThisFunctionPtr METHOD_TABLE_ENTRY(toThis);
 
-    using DefaultValueFunctionPtr = JSValue (*)(const JSObject*, ExecState*, PreferredPrimitiveType);
+    using DefaultValueFunctionPtr = JSValue (*)(const JSObject*, JSGlobalObject*, PreferredPrimitiveType);
     DefaultValueFunctionPtr METHOD_TABLE_ENTRY(defaultValue);
 
-    using GetOwnPropertyNamesFunctionPtr = void (*)(JSObject*, ExecState*, PropertyNameArray&, EnumerationMode);
+    using GetOwnPropertyNamesFunctionPtr = void (*)(JSObject*, JSGlobalObject*, PropertyNameArray&, EnumerationMode);
     GetOwnPropertyNamesFunctionPtr METHOD_TABLE_ENTRY(getOwnPropertyNames);
 
-    using GetOwnNonIndexPropertyNamesFunctionPtr = void (*)(JSObject*, ExecState*, PropertyNameArray&, EnumerationMode);
+    using GetOwnNonIndexPropertyNamesFunctionPtr = void (*)(JSObject*, JSGlobalObject*, PropertyNameArray&, EnumerationMode);
     GetOwnNonIndexPropertyNamesFunctionPtr METHOD_TABLE_ENTRY(getOwnNonIndexPropertyNames);
 
-    using GetPropertyNamesFunctionPtr = void (*)(JSObject*, ExecState*, PropertyNameArray&, EnumerationMode);
+    using GetPropertyNamesFunctionPtr = void (*)(JSObject*, JSGlobalObject*, PropertyNameArray&, EnumerationMode);
     GetPropertyNamesFunctionPtr METHOD_TABLE_ENTRY(getPropertyNames);
 
-    using GetEnumerableLengthFunctionPtr = uint32_t (*)(ExecState*, JSObject*);
+    using GetEnumerableLengthFunctionPtr = uint32_t (*)(JSGlobalObject*, JSObject*);
     GetEnumerableLengthFunctionPtr METHOD_TABLE_ENTRY(getEnumerableLength);
 
     GetPropertyNamesFunctionPtr METHOD_TABLE_ENTRY(getStructurePropertyNames);
@@ -99,25 +98,25 @@ struct MethodTable {
     using ClassNameFunctionPtr = String (*)(const JSObject*, VM&);
     ClassNameFunctionPtr METHOD_TABLE_ENTRY(className);
 
-    using ToStringNameFunctionPtr = String (*)(const JSObject*, ExecState*);
+    using ToStringNameFunctionPtr = String (*)(const JSObject*, JSGlobalObject*);
     ToStringNameFunctionPtr METHOD_TABLE_ENTRY(toStringName);
 
-    using CustomHasInstanceFunctionPtr = bool (*)(JSObject*, ExecState*, JSValue);
+    using CustomHasInstanceFunctionPtr = bool (*)(JSObject*, JSGlobalObject*, JSValue);
     CustomHasInstanceFunctionPtr METHOD_TABLE_ENTRY(customHasInstance);
 
-    using DefineOwnPropertyFunctionPtr = bool (*)(JSObject*, ExecState*, PropertyName, const PropertyDescriptor&, bool);
+    using DefineOwnPropertyFunctionPtr = bool (*)(JSObject*, JSGlobalObject*, PropertyName, const PropertyDescriptor&, bool);
     DefineOwnPropertyFunctionPtr METHOD_TABLE_ENTRY(defineOwnProperty);
 
-    using PreventExtensionsFunctionPtr = bool (*)(JSObject*, ExecState*);
+    using PreventExtensionsFunctionPtr = bool (*)(JSObject*, JSGlobalObject*);
     PreventExtensionsFunctionPtr METHOD_TABLE_ENTRY(preventExtensions);
 
-    using IsExtensibleFunctionPtr = bool (*)(JSObject*, ExecState*);
+    using IsExtensibleFunctionPtr = bool (*)(JSObject*, JSGlobalObject*);
     IsExtensibleFunctionPtr METHOD_TABLE_ENTRY(isExtensible);
 
-    using SetPrototypeFunctionPtr = bool (*)(JSObject*, ExecState*, JSValue, bool shouldThrowIfCantSet);
+    using SetPrototypeFunctionPtr = bool (*)(JSObject*, JSGlobalObject*, JSValue, bool shouldThrowIfCantSet);
     SetPrototypeFunctionPtr METHOD_TABLE_ENTRY(setPrototype);
 
-    using GetPrototypeFunctionPtr = JSValue (*)(JSObject*, ExecState*);
+    using GetPrototypeFunctionPtr = JSValue (*)(JSObject*, JSGlobalObject*);
     GetPrototypeFunctionPtr METHOD_TABLE_ENTRY(getPrototype);
 
     using DumpToStreamFunctionPtr = void (*)(const JSCell*, PrintStream&);
@@ -152,7 +151,9 @@ struct MethodTable {
 
 #define HAS_MEMBER_NAMED(klass, name) (MemberCheck##name<klass>::has)
 
-#define CREATE_METHOD_TABLE(ClassName) { \
+#define CREATE_METHOD_TABLE(ClassName) \
+    JSCastingHelpers::InheritsTraits<ClassName>::typeRange, \
+    { \
         &ClassName::destroy, \
         &ClassName::visitChildren, \
         &ClassName::getCallData, \
@@ -185,15 +186,23 @@ struct MethodTable {
         &ClassName::estimatedSize, \
         &ClassName::visitOutputConstraints, \
     }, \
-    ClassName::TypedArrayStorageType
+    ClassName::TypedArrayStorageType, \
+    sizeof(ClassName),
 
 struct ClassInfo {
+    using CheckJSCastSnippetFunctionPtr = Ref<Snippet> (*)(void);
+
     // A string denoting the class name. Example: "Window".
     const char* className;
-
     // Pointer to the class information of the base class.
     // nullptrif there is none.
     const ClassInfo* parentClass;
+    const HashTable* staticPropHashTable;
+    CheckJSCastSnippetFunctionPtr checkSubClassSnippet;
+    const Optional<JSTypeRange> inheritsJSTypeRange; // This is range of JSTypes for doing inheritance checking. Has the form: [firstJSType, lastJSType] (inclusive).
+    MethodTable methodTable;
+    const TypedArrayType typedArrayStorageType;
+    const unsigned staticClassSize;
 
     static ptrdiff_t offsetOfParentClass()
     {
@@ -212,15 +221,6 @@ struct ClassInfo {
     JS_EXPORT_PRIVATE void dump(PrintStream&) const;
 
     JS_EXPORT_PRIVATE bool hasStaticSetterOrReadonlyProperties() const;
-
-    const HashTable* staticPropHashTable;
-
-    using CheckSubClassSnippetFunctionPtr = Ref<Snippet> (*)(void);
-    CheckSubClassSnippetFunctionPtr checkSubClassSnippet;
-
-    MethodTable methodTable;
-
-    TypedArrayType typedArrayStorageType;
 };
 
 } // namespace JSC

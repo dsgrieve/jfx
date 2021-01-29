@@ -25,7 +25,6 @@
 
 #pragma once
 
-#include "Animation.h"
 #include "Color.h"
 #include "EventRegion.h"
 #include "FilterOperations.h"
@@ -38,8 +37,11 @@
 #include "PlatformLayer.h"
 #include "Region.h"
 #include "ScrollableArea.h"
+#include "ScrollTypes.h"
+#include "TimingFunction.h"
 #include "TransformOperations.h"
 #include "WindRule.h"
+#include <wtf/EnumTraits.h>
 #include <wtf/Function.h>
 #include <wtf/TypeCasts.h>
 
@@ -53,6 +55,7 @@ class TextStream;
 
 namespace WebCore {
 
+class Animation;
 class GraphicsContext;
 class GraphicsLayerFactory;
 class Image;
@@ -268,6 +271,7 @@ public:
     // Layer name. Only used to identify layers in debug output
     const String& name() const { return m_name; }
     virtual void setName(const String& name) { m_name = name; }
+    virtual String debugName() const;
 
     GraphicsLayer* parent() const { return m_parent; };
     void setParent(GraphicsLayer*); // Internal use only.
@@ -320,6 +324,11 @@ public:
     // Scroll offset of the content layer inside its scrolling parent layer.
     ScrollOffset scrollOffset() const { return m_scrollOffset; }
     void setScrollOffset(const ScrollOffset&, ShouldSetNeedsDisplay = SetNeedsDisplay);
+
+#if ENABLE(SCROLLING_THREAD)
+    ScrollingNodeID scrollingNodeID() const { return m_scrollingNodeID; }
+    virtual void setScrollingNodeID(ScrollingNodeID nodeID) { m_scrollingNodeID = nodeID; }
+#endif
 
     // The position of the layer (the location of its top-left corner in its parent)
     const FloatPoint& position() const { return m_position; }
@@ -444,6 +453,10 @@ public:
     FloatRoundedRect contentsClippingRect() const { return m_contentsClippingRect; }
     virtual void setContentsClippingRect(const FloatRoundedRect& roundedRect) { m_contentsClippingRect = roundedRect; }
 
+    // If true, contentsClippingRect is used to clip child GraphicsLayers.
+    bool contentsRectClipsDescendants() const { return m_contentsRectClipsDescendants; }
+    virtual void setContentsRectClipsDescendants(bool b) { m_contentsRectClipsDescendants = b; }
+
     // Set a rounded rect that is used to clip this layer and its descendants (implies setting masksToBounds).
     // Returns false if the platform can't support this rounded clip, and we should fall back to painting a mask.
     FloatRoundedRect maskToBoundsRect() const { return m_masksToBoundsRect; };
@@ -466,7 +479,6 @@ public:
     // These methods handle both transitions and keyframe animations.
     virtual bool addAnimation(const KeyframeValueList&, const FloatSize& /*boxSize*/, const Animation*, const String& /*animationName*/, double /*timeOffset*/)  { return false; }
     virtual void pauseAnimation(const String& /*animationName*/, double /*timeOffset*/) { }
-    virtual void seekAnimation(const String& /*animationName*/, double /*timeOffset*/) { }
     virtual void removeAnimation(const String& /*animationName*/) { }
 
     WEBCORE_EXPORT virtual void suspendAnimations(MonotonicTime);
@@ -607,8 +619,6 @@ public:
 
     void updateDebugIndicators();
 
-    virtual bool canThrottleLayerFlush() const { return false; }
-
     virtual bool isGraphicsLayerCA() const { return false; }
     virtual bool isGraphicsLayerCARemote() const { return false; }
     virtual bool isGraphicsLayerTextureMapper() const { return false; }
@@ -684,6 +694,10 @@ protected:
     FilterOperations m_filters;
     FilterOperations m_backdropFilters;
 
+#if ENABLE(SCROLLING_THREAD)
+    ScrollingNodeID m_scrollingNodeID { 0 };
+#endif
+
 #if ENABLE(CSS_COMPOSITING)
     BlendMode m_blendMode { BlendMode::Normal };
 #endif
@@ -701,6 +715,7 @@ protected:
     bool m_masksToBounds : 1;
     bool m_drawsContent : 1;
     bool m_contentsVisible : 1;
+    bool m_contentsRectClipsDescendants : 1;
     bool m_acceleratesDrawing : 1;
     bool m_usesDisplayListDrawing : 1;
     bool m_appliesPageScale : 1; // Set for the layer which has the page scale applied to it.
@@ -753,3 +768,18 @@ SPECIALIZE_TYPE_TRAITS_END()
 // Outside the WebCore namespace for ease of invocation from the debugger.
 void showGraphicsLayerTree(const WebCore::GraphicsLayer* layer);
 #endif
+
+namespace WTF {
+
+template<> struct EnumTraits<WebCore::GraphicsLayer::CustomAppearance> {
+    using values = EnumValues<
+        WebCore::GraphicsLayer::CustomAppearance,
+        WebCore::GraphicsLayer::CustomAppearance::None,
+        WebCore::GraphicsLayer::CustomAppearance::ScrollingOverhang,
+        WebCore::GraphicsLayer::CustomAppearance::ScrollingShadow,
+        WebCore::GraphicsLayer::CustomAppearance::LightBackdrop,
+        WebCore::GraphicsLayer::CustomAppearance::DarkBackdrop
+    >;
+};
+
+} // namespace WTF

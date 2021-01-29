@@ -77,8 +77,6 @@ public:
     void absoluteQuadsForSelection(Vector<FloatQuad>& quads) const override;
 #endif
 
-    void updateDragState(bool dragOn) final;
-
     LayoutSize offsetForInFlowPositionedInline(const RenderBox* child) const;
 
     void addFocusRingRects(Vector<LayoutRect>&, const LayoutPoint& additionalOffset, const RenderLayerModelObject* paintContainer = 0) final;
@@ -108,6 +106,8 @@ private:
     LayoutRect culledInlineVisualOverflowBoundingBox() const;
     InlineBox* culledInlineFirstLineBox() const;
     InlineBox* culledInlineLastLineBox() const;
+
+    void absoluteQuadsIgnoringContinuation(const FloatRect&, Vector<FloatQuad>&, bool* wasFixed) const override;
 
     template<typename GeneratorContext>
     void generateLineBoxRects(GeneratorContext& yield) const;

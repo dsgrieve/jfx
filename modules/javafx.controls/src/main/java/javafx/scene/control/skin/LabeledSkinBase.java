@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2010, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -118,7 +118,7 @@ public abstract class LabeledSkinBase<C extends Labeled> extends SkinBase<C> {
      */
     final InvalidationListener graphicPropertyChangedListener = valueModel -> {
         invalidText = true;
-        if (getSkinnable() != null) getSkinnable().requestLayout();
+        getSkinnable().requestLayout();
     };
 
     private Rectangle textClip;
@@ -239,6 +239,17 @@ public abstract class LabeledSkinBase<C extends Labeled> extends SkinBase<C> {
      * Public API                                                              *
      *                                                                         *
      **************************************************************************/
+
+    @Override
+    public void dispose() {
+        if (graphic != null) {
+            graphic.layoutBoundsProperty().removeListener(graphicPropertyChangedListener);
+            graphic = null;
+        }
+        super.dispose();
+    }
+
+
 
     /**
      * Updates the children managed by LabeledSkinBase, which can be the Labeled
@@ -580,7 +591,8 @@ public abstract class LabeledSkinBase<C extends Labeled> extends SkinBase<C> {
         if (containsMnemonic) {
             final Font font = text.getFont();
             String preSt = bindings.getText();
-            mnemonicPos = Utils.computeMnemonicPosition(font, preSt, bindings.getMnemonicIndex(), this.wrapWidth, labeled.getLineSpacing());
+            boolean isRTL = (labeledNode.getEffectiveNodeOrientation() == NodeOrientation.RIGHT_TO_LEFT);
+            mnemonicPos = Utils.computeMnemonicPosition(font, preSt, bindings.getMnemonicIndex(), this.wrapWidth, labeled.getLineSpacing(), isRTL);
             mnemonicWidth = Utils.computeTextWidth(font, preSt.substring(bindings.getMnemonicIndex(), bindings.getMnemonicIndex() + 1), 0);
             mnemonicHeight = Utils.computeTextHeight(font, "_", 0, text.getBoundsType());
         }
@@ -1106,7 +1118,7 @@ public abstract class LabeledSkinBase<C extends Labeled> extends SkinBase<C> {
             String ellipsisString = labeled.getEllipsisString();
 
             if (labeled.isWrapText()) {
-                result = Utils.computeClippedWrappedText(font, s, wrapWidth, wrapHeight, truncationStyle, ellipsisString, text.getBoundsType());
+                result = Utils.computeClippedWrappedText(font, s, wrapWidth, wrapHeight, labeled.getLineSpacing(), truncationStyle, ellipsisString, text.getBoundsType());
             } else if (multiline) {
                 StringBuilder sb = new StringBuilder();
 

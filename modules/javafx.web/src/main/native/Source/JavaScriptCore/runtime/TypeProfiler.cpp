@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 Apple Inc. All Rights Reserved.
+ * Copyright (C) 2014-2019 Apple Inc. All Rights Reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -26,14 +26,13 @@
 #include "config.h"
 #include "TypeProfiler.h"
 
-#include "InspectorProtocolObjects.h"
 #include "TypeLocation.h"
 #include <wtf/text/StringBuilder.h>
 
 namespace JSC {
 
 namespace TypeProfilerInternal {
-static const bool verbose = false;
+static constexpr bool verbose = false;
 }
 
 TypeProfiler::TypeProfiler()

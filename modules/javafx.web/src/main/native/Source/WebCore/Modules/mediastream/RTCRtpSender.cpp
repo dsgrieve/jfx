@@ -33,11 +33,11 @@
 
 #if ENABLE(WEB_RTC)
 
+#include "JSDOMPromiseDeferred.h"
 #include "RTCDTMFSender.h"
 #include "RTCDTMFSenderBackend.h"
 #include "RTCRtpCapabilities.h"
 #include "RTCRtpTransceiver.h"
-#include "RuntimeEnabledFeatures.h"
 #include <wtf/IsoMallocInlines.h>
 
 namespace WebCore {
@@ -62,7 +62,7 @@ RTCRtpSender::RTCRtpSender(PeerConnectionBackend& connection, String&& trackKind
     , m_backend(WTFMove(backend))
     , m_connection(makeWeakPtr(&connection))
 {
-    ASSERT(!RuntimeEnabledFeatures::sharedFeatures().webRTCUnifiedPlanEnabled() || m_backend);
+    ASSERT(m_backend);
 }
 
 RTCRtpSender::~RTCRtpSender() = default;
@@ -142,7 +142,7 @@ Optional<RTCRtpCapabilities> RTCRtpSender::getCapabilities(ScriptExecutionContex
 
 RTCDTMFSender* RTCRtpSender::dtmf()
 {
-    if (!m_dtmfSender && m_connection && m_connection->context() && m_backend)
+    if (!m_dtmfSender && m_connection && m_connection->context() && m_backend && m_trackKind == "audio")
         m_dtmfSender = RTCDTMFSender::create(*m_connection->context(), *this, m_backend->createDTMFBackend());
 
     return m_dtmfSender.get();

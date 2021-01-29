@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -356,7 +356,7 @@ void TestRunner::abortModal()
     //FIXME: implement
 }
 
-void TestRunner::addOriginAccessWhitelistEntry(
+void TestRunner::addOriginAccessAllowListEntry(
     JSStringRef sourceOrigin,
     JSStringRef destinationProtocol,
     JSStringRef destinationHost,
@@ -392,7 +392,7 @@ bool TestRunner::callShouldCloseOnWebView()
     return false;
 }
 
-void TestRunner::removeOriginAccessWhitelistEntry(JSStringRef, JSStringRef, JSStringRef,bool) {
+void TestRunner::removeOriginAccessAllowListEntry(JSStringRef, JSStringRef, JSStringRef,bool) {
     //FIXME: implement
 }
 
@@ -593,12 +593,7 @@ unsigned TestRunner::imageCountInGeneralPasteboard() const
 
 void TestRunner::forceImmediateCompletion()
 {
-    fprintf(testResult, "ERROR: TestRunner::forceImmediateCompletion() not implemented\n");
-}
-
-void TestRunner::setSpellCheckerResults(JSContextRef, JSObjectRef)
-{
-    fprintf(testResult, "ERROR: TestRunner::setSpellCheckerResults() not implemented\n");
+    notifyDone();
 }
 
 void TestRunner::setOnlyAcceptFirstPartyCookies(bool)

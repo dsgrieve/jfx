@@ -29,35 +29,97 @@
 
 #include "FormattingContext.h"
 #include "TableFormattingState.h"
+#include "TableGrid.h"
 #include <wtf/IsoMalloc.h>
+#include <wtf/UniqueRef.h>
 
 namespace WebCore {
 namespace Layout {
 
+class InvalidationState;
 // This class implements the layout logic for table formatting contexts.
 // https://www.w3.org/TR/CSS22/tables.html
-class TableFormattingContext : public FormattingContext {
+class TableFormattingContext final : public FormattingContext {
     WTF_MAKE_ISO_ALLOCATED(TableFormattingContext);
 public:
-    TableFormattingContext(const Box& formattingContextRoot, TableFormattingState&);
-    void layout() const override;
+    TableFormattingContext(const ContainerBox& formattingContextRoot, TableFormattingState&);
+    void layoutInFlowContent(InvalidationState&, const ConstraintsForInFlowContent&) override;
+
+    static UniqueRef<TableGrid> ensureTableGrid(const ContainerBox& tableBox);
 
 private:
-    class Geometry : public FormattingContext::Geometry {
+    class TableLayout {
     public:
-        static HeightAndMargin tableCellHeightAndMargin(const LayoutState&, const Box&);
+        TableLayout(const TableFormattingContext&, const TableGrid&);
+
+        using DistributedSpaces = Vector<LayoutUnit>;
+        DistributedSpaces distributedHorizontalSpace(LayoutUnit availableHorizontalSpace);
+        DistributedSpaces distributedVerticalSpace(Optional<LayoutUnit> availableVerticalSpace);
+
+    private:
+        const TableFormattingContext& formattingContext() const { return m_formattingContext; }
+
+        const TableFormattingContext& m_formattingContext;
+        const TableGrid& m_grid;
     };
 
-    IntrinsicWidthConstraints computedIntrinsicWidthConstraints() const override;
-    LayoutUnit computedTableWidth() const;
+    class Geometry : public FormattingContext::Geometry {
+    public:
+        LayoutUnit cellHeigh(const ContainerBox&) const;
+        Edges computedCellBorder(const TableGrid::Cell&) const;
+        Optional<LayoutUnit> computedColumnWidth(const ContainerBox& columnBox);
+        FormattingContext::IntrinsicWidthConstraints intrinsicWidthConstraintsForCell(const TableGrid::Cell&);
+        InlineLayoutUnit usedBaselineForCell(const ContainerBox& cellBox);
 
-    void ensureTableGrid() const;
-    void computePreferredWidthForColumns() const;
-    void distributeAvailableWidth(LayoutUnit extraHorizontalSpace) const;
+    private:
+        friend class TableFormattingContext;
+        Geometry(const TableFormattingContext&, const TableGrid&);
 
-    TableFormattingState& formattingState() const { return downcast<TableFormattingState>(FormattingContext::formattingState()); }
+        const TableFormattingContext& formattingContext() const { return downcast<TableFormattingContext>(FormattingContext::Geometry::formattingContext()); }
+        const TableGrid& m_grid;
+    };
+    TableFormattingContext::Geometry geometry() const { return Geometry(*this, formattingState().tableGrid()); }
+
+    class Quirks : public FormattingContext::Quirks {
+    public:
+        Quirks(const TableFormattingContext&);
+
+        bool shouldIgnoreChildContentVerticalMargin(const ContainerBox&) const;
+
+        const TableFormattingContext& formattingContext() const { return downcast<TableFormattingContext>(FormattingContext::Quirks::formattingContext()); }
+        TableFormattingContext::Geometry geometry() const { return formattingContext().geometry(); }
+    };
+    TableFormattingContext::Quirks quirks() const { return Quirks(*this); }
+
+    TableFormattingContext::TableLayout tableLayout() const { return TableLayout(*this, formattingState().tableGrid()); }
+
+    IntrinsicWidthConstraints computedIntrinsicWidthConstraints() override;
+    void layoutCell(const TableGrid::Cell&, LayoutUnit availableHorizontalSpace, Optional<LayoutUnit> usedCellHeight = WTF::nullopt);
+    void setUsedGeometryForCells(LayoutUnit availableHorizontalSpace);
+    void setUsedGeometryForRows(LayoutUnit availableHorizontalSpace);
+    void setUsedGeometryForSections(const ConstraintsForInFlowContent&);
+
+    IntrinsicWidthConstraints computedPreferredWidthForColumns();
+    void computeAndDistributeExtraSpace(LayoutUnit availableHorizontalSpace, Optional<LayoutUnit> availableVerticalSpace);
+
+    const TableFormattingState& formattingState() const { return downcast<TableFormattingState>(FormattingContext::formattingState()); }
+    TableFormattingState& formattingState() { return downcast<TableFormattingState>(FormattingContext::formattingState()); }
 };
 
+inline TableFormattingContext::Geometry::Geometry(const TableFormattingContext& tableFormattingContext, const TableGrid& grid)
+    : FormattingContext::Geometry(tableFormattingContext)
+    , m_grid(grid)
+{
+}
+
+inline TableFormattingContext::Quirks::Quirks(const TableFormattingContext& tableFormattingContext)
+    : FormattingContext::Quirks(tableFormattingContext)
+{
+}
+
 }
 }
+
+SPECIALIZE_TYPE_TRAITS_LAYOUT_FORMATTING_CONTEXT(TableFormattingContext, isTableFormattingContext())
+
 #endif

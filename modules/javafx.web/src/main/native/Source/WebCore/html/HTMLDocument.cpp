@@ -56,7 +56,6 @@
 #include "CSSPropertyNames.h"
 #include "CommonVM.h"
 #include "CookieJar.h"
-#include "CustomHeaderFields.h"
 #include "DOMWindow.h"
 #include "DocumentLoader.h"
 #include "DocumentType.h"
@@ -75,7 +74,6 @@
 #include "HTMLHtmlElement.h"
 #include "HTMLIFrameElement.h"
 #include "HTMLNames.h"
-#include "HashTools.h"
 #include "ScriptController.h"
 #include "StyleResolver.h"
 #include <wtf/IsoMallocInlines.h>
@@ -89,11 +87,11 @@ using namespace HTMLNames;
 
 Ref<HTMLDocument> HTMLDocument::createSynthesizedDocument(Frame& frame, const URL& url)
 {
-    return adoptRef(*new HTMLDocument(frame.sessionID(), &frame, url, HTMLDocumentClass, Synthesized));
+    return adoptRef(*new HTMLDocument(&frame, url, HTMLDocumentClass, Synthesized));
 }
 
-HTMLDocument::HTMLDocument(PAL::SessionID sessionID, Frame* frame, const URL& url, DocumentClassFlags documentClasses, unsigned constructionFlags)
-    : Document(sessionID, frame, url, documentClasses | HTMLDocumentClass, constructionFlags)
+HTMLDocument::HTMLDocument(Frame* frame, const URL& url, DocumentClassFlags documentClasses, unsigned constructionFlags)
+    : Document(frame, url, documentClasses | HTMLDocumentClass, constructionFlags)
 {
     clearXMLVersion();
 }
@@ -252,7 +250,7 @@ bool HTMLDocument::isFrameSet() const
 
 Ref<Document> HTMLDocument::cloneDocumentWithoutChildren() const
 {
-    return create(sessionID(), nullptr, url());
+    return create(nullptr, url());
 }
 
 }

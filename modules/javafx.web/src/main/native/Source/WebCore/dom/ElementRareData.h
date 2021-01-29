@@ -24,13 +24,16 @@
 #include "CustomElementReactionQueue.h"
 #include "DOMTokenList.h"
 #include "DatasetDOMStringMap.h"
+#include "ElementAnimationRareData.h"
 #include "IntersectionObserver.h"
+#include "KeyframeEffectStack.h"
 #include "NamedNodeMap.h"
 #include "NodeRareData.h"
 #include "PseudoElement.h"
 #include "RenderElement.h"
 #include "ResizeObserver.h"
 #include "ShadowRoot.h"
+#include "SpaceSplitString.h"
 #include "StylePropertyMap.h"
 
 namespace WebCore {
@@ -99,8 +102,17 @@ public:
     bool hasCSSAnimation() const { return m_hasCSSAnimation; }
     void setHasCSSAnimation(bool value) { m_hasCSSAnimation = value; }
 
+    ElementAnimationRareData* elementAnimationRareData() { return m_animationRareData.get(); }
+    ElementAnimationRareData& ensureAnimationRareData();
+
     bool hasElementIdentifier() const { return m_hasElementIdentifier; }
     void setHasElementIdentifier(bool value) { m_hasElementIdentifier = value; }
+
+    DOMTokenList* partList() const { return m_partList.get(); }
+    void setPartList(std::unique_ptr<DOMTokenList> partList) { m_partList = WTFMove(partList); }
+
+    const SpaceSplitString& partNames() const { return m_partNames; }
+    void setPartNames(SpaceSplitString&& partNames) { m_partNames = WTFMove(partNames); }
 
 #if ENABLE(INTERSECTION_OBSERVER)
     IntersectionObserverData* intersectionObserverData() { return m_intersectionObserverData.get(); }
@@ -147,6 +159,8 @@ public:
 #endif
         if (m_beforePseudoElement || m_afterPseudoElement)
             result.add(UseType::PseudoElements);
+        if (m_animationRareData)
+            result.add(UseType::Animations);
         return result;
     }
 #endif
@@ -179,12 +193,17 @@ private:
     std::unique_ptr<ResizeObserverData> m_resizeObserverData;
 #endif
 
+    std::unique_ptr<ElementAnimationRareData> m_animationRareData;
+
     RefPtr<PseudoElement> m_beforePseudoElement;
     RefPtr<PseudoElement> m_afterPseudoElement;
 
 #if ENABLE(CSS_TYPED_OM)
     RefPtr<StylePropertyMap> m_attributeStyleMap;
 #endif
+
+    std::unique_ptr<DOMTokenList> m_partList;
+    SpaceSplitString m_partNames;
 
     void releasePseudoElement(PseudoElement*);
 };
@@ -231,6 +250,13 @@ inline void ElementRareData::resetComputedStyle()
 inline void ElementRareData::resetStyleRelations()
 {
     setChildIndex(0);
+}
+
+inline ElementAnimationRareData& ElementRareData::ensureAnimationRareData()
+{
+    if (!m_animationRareData)
+        m_animationRareData = makeUnique<ElementAnimationRareData>();
+    return *m_animationRareData.get();
 }
 
 } // namespace WebCore

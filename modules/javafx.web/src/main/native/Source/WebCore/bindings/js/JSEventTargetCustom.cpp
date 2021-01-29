@@ -34,11 +34,19 @@
 #include "JSEventListener.h"
 #include "JSWindowProxy.h"
 #include "JSWorkerGlobalScope.h"
-#include "OffscreenCanvas.h"
 #include "WorkerGlobalScope.h"
+
+#if ENABLE(OFFSCREEN_CANVAS)
+#include "OffscreenCanvas.h"
+#endif
 
 namespace WebCore {
 using namespace JSC;
+
+JSValue toJSNewlyCreated(JSGlobalObject*, JSDOMGlobalObject* globalObject, Ref<EventTarget>&& value)
+{
+    return createWrapper<EventTarget>(globalObject, WTFMove(value));
+}
 
 EventTarget* JSEventTarget::toWrapped(VM& vm, JSValue value)
 {

@@ -33,7 +33,9 @@
 #include "CanvasGradient.h"
 #include "CanvasPattern.h"
 #include "CanvasRenderingContext2D.h"
+#include "DisplayListDrawingContext.h"
 #include "Document.h"
+#include "EventNames.h"
 #include "Frame.h"
 #include "FrameLoaderClient.h"
 #include "GPUBasedCanvasRenderingContext.h"
@@ -55,7 +57,6 @@
 #include "Settings.h"
 #include "StringAdaptors.h"
 #include <JavaScriptCore/JSCInlines.h>
-#include <JavaScriptCore/JSLock.h>
 #include <math.h>
 #include <wtf/IsoMallocInlines.h>
 #include <wtf/RAMSize.h>
@@ -77,6 +78,21 @@
 
 #if ENABLE(WEBGPU)
 #include "GPUCanvasContext.h"
+#endif
+
+#if ENABLE(WEBXR)
+#include "DOMWindow.h"
+#include "Navigator.h"
+#include "NavigatorWebXR.h"
+#include "WebXRSystem.h"
+#endif
+
+#if USE(CG)
+#include "ImageBufferUtilitiesCG.h"
+#endif
+
+#if USE(GSTREAMER)
+#include "MediaSampleGStreamer.h"
 #endif
 
 #if PLATFORM(COCOA)
@@ -104,51 +120,41 @@ const unsigned maxCanvasArea = 4096 * 4096;
 const unsigned maxCanvasArea = 16384 * 16384;
 #endif
 
-#if USE(CG)
-// FIXME: It seems strange that the default quality is not the one that is literally named "default".
-// Should fix names to make this easier to understand, or write an excellent comment here explaining why not.
-const InterpolationQuality defaultInterpolationQuality = InterpolationLow;
-#else
-const InterpolationQuality defaultInterpolationQuality = InterpolationDefault;
-#endif
-
-static size_t activePixelMemory = 0;
+static size_t maxActivePixelMemoryForTesting = 0;
 
 HTMLCanvasElement::HTMLCanvasElement(const QualifiedName& tagName, Document& document)
     : HTMLElement(tagName, document)
-    , m_size(defaultWidth, defaultHeight)
+    , CanvasBase(IntSize(defaultWidth, defaultHeight))
+    , ActiveDOMObject(document)
 {
     ASSERT(hasTagName(canvasTag));
+    addObserver(document);
 }
 
 Ref<HTMLCanvasElement> HTMLCanvasElement::create(Document& document)
 {
-    return adoptRef(*new HTMLCanvasElement(canvasTag, document));
+    auto canvas = adoptRef(*new HTMLCanvasElement(canvasTag, document));
+    canvas->suspendIfNeeded();
+    return canvas;
 }
 
 Ref<HTMLCanvasElement> HTMLCanvasElement::create(const QualifiedName& tagName, Document& document)
 {
-    return adoptRef(*new HTMLCanvasElement(tagName, document));
-}
-
-static void removeFromActivePixelMemory(size_t pixelsReleased)
-{
-    if (!pixelsReleased)
-        return;
-
-    if (pixelsReleased < activePixelMemory)
-        activePixelMemory -= pixelsReleased;
-    else
-        activePixelMemory = 0;
+    auto canvas = adoptRef(*new HTMLCanvasElement(tagName, document));
+    canvas->suspendIfNeeded();
+    return canvas;
 }
 
 HTMLCanvasElement::~HTMLCanvasElement()
 {
+    // FIXME: This has to be called here because CSSCanvasValue::CanvasObserverProxy::canvasDestroyed()
+    // downcasts the CanvasBase object to HTMLCanvasElement. That invokes virtual methods, which should be
+    // avoided in destructors, but works as long as it's done before HTMLCanvasElement destructs completely.
     notifyObserversCanvasDestroyed();
+    document().clearCanvasPreparation(this);
 
     m_context = nullptr; // Ensure this goes away before the ImageBuffer.
-
-    releaseImageBufferAndContext();
+    setImageBuffer(nullptr);
 }
 
 void HTMLCanvasElement::parseAttribute(const QualifiedName& name, const AtomString& value)
@@ -192,8 +198,23 @@ ExceptionOr<void> HTMLCanvasElement::setWidth(unsigned value)
     return { };
 }
 
+void HTMLCanvasElement::setSize(const IntSize& newSize)
+{
+    if (newSize == size())
+        return;
+
+    m_ignoreReset = true;
+    setWidth(newSize.width());
+    setHeight(newSize.height());
+    m_ignoreReset = false;
+    reset();
+}
+
 static inline size_t maxActivePixelMemory()
 {
+    if (maxActivePixelMemoryForTesting)
+        return maxActivePixelMemoryForTesting;
+
     static size_t maxPixelMemory;
     static std::once_flag onceFlag;
     std::call_once(onceFlag, [] {
@@ -203,10 +224,16 @@ static inline size_t maxActivePixelMemory()
         maxPixelMemory = std::max(ramSize() / 4, 2151 * MB);
 #endif
     });
+
     return maxPixelMemory;
 }
 
-ExceptionOr<Optional<RenderingContext>> HTMLCanvasElement::getContext(JSC::ExecState& state, const String& contextId, Vector<JSC::Strong<JSC::Unknown>>&& arguments)
+void HTMLCanvasElement::setMaxPixelMemoryForTesting(size_t size)
+{
+    maxActivePixelMemoryForTesting = size;
+}
+
+ExceptionOr<Optional<RenderingContext>> HTMLCanvasElement::getContext(JSC::JSGlobalObject& state, const String& contextId, Vector<JSC::Strong<JSC::Unknown>>&& arguments)
 {
     if (m_context) {
         if (m_context->isPlaceholder())
@@ -331,7 +358,7 @@ CanvasRenderingContext2D* HTMLCanvasElement::createContext2d(const String& type)
 
     // Make sure we don't use more pixel memory than the system can support.
     size_t requestedPixelMemory = 4 * width() * height();
-    if (activePixelMemory + requestedPixelMemory > maxActivePixelMemory()) {
+    if (activePixelMemory() + requestedPixelMemory > maxActivePixelMemory()) {
         StringBuilder stringBuilder;
         stringBuilder.appendLiteral("Total canvas memory use exceeds the maximum limit (");
         stringBuilder.appendNumber(maxActivePixelMemory() / 1024 / 1024);
@@ -341,9 +368,6 @@ CanvasRenderingContext2D* HTMLCanvasElement::createContext2d(const String& type)
     }
 
     m_context = CanvasRenderingContext2D::create(*this, document().inQuirksMode());
-
-    downcast<CanvasRenderingContext2D>(*m_context).setUsesDisplayListDrawing(m_usesDisplayListDrawing);
-    downcast<CanvasRenderingContext2D>(*m_context).setTracksDisplayListReplay(m_tracksDisplayListReplay);
 
 #if USE(IOSURFACE_CANVAS_BACKING_STORE) || ENABLE(ACCELERATED_2D_CANVAS)
     // Need to make sure a RenderLayer and compositing layer get created for the Canvas.
@@ -405,10 +429,23 @@ WebGLRenderingContextBase* HTMLCanvasElement::createContextWebGL(const String& t
     if (!shouldEnableWebGL(document().settings()))
         return nullptr;
 
+#if ENABLE(WEBXR)
+    // https://immersive-web.github.io/webxr/#xr-compatible
+    if (attrs.xrCompatible) {
+        if (auto* window = document().domWindow())
+            NavigatorWebXR::xr(window->navigator()).ensureImmersiveXRDeviceIsSelected();
+    }
+#endif
+
+    // TODO(WEBXR): ensure the context is created in a compatible graphics
+    // adapter when there is an active immersive device.
     m_context = WebGLRenderingContextBase::create(*this, attrs, type);
     if (m_context) {
         // Need to make sure a RenderLayer and compositing layer get created for the Canvas.
         invalidateStyleAndLayerComposition();
+#if ENABLE(WEBXR)
+        ASSERT(!attrs.xrCompatible || downcast<WebGLRenderingContextBase>(m_context.get())->isXRCompatible());
+#endif
     }
 
     return downcast<WebGLRenderingContextBase>(m_context.get());
@@ -537,12 +574,7 @@ void HTMLCanvasElement::reset()
     int w = limitToOnlyHTMLNonNegative(attributeWithoutSynchronization(widthAttr), defaultWidth);
     int h = limitToOnlyHTMLNonNegative(attributeWithoutSynchronization(heightAttr), defaultHeight);
 
-    if (m_contextStateSaver) {
-        // Reset to the initial graphics context state.
-        m_contextStateSaver->restore();
-        m_contextStateSaver->save();
-    }
-
+    resetGraphicsContextState();
     if (is<CanvasRenderingContext2D>(m_context.get()))
         downcast<CanvasRenderingContext2D>(*m_context).reset();
 
@@ -603,7 +635,7 @@ void HTMLCanvasElement::paint(GraphicsContext& context, const LayoutRect& r)
         bool shouldPaint = true;
 
         if (m_context) {
-            shouldPaint = paintsIntoCanvasBuffer() || document().printing();
+            shouldPaint = paintsIntoCanvasBuffer() || document().printing() || m_isSnapshotting;
             if (shouldPaint)
                 m_context->paintRenderingResultsToCanvas();
         }
@@ -630,12 +662,6 @@ bool HTMLCanvasElement::isGPUBased() const
     return m_context && m_context->isGPUBased();
 }
 
-void HTMLCanvasElement::makeRenderingResultsAvailable()
-{
-    if (m_context)
-        m_context->paintRenderingResultsToCanvas();
-}
-
 void HTMLCanvasElement::makePresentationCopy()
 {
     if (!m_presentedImage) {
@@ -649,17 +675,11 @@ void HTMLCanvasElement::clearPresentationCopy()
     m_presentedImage = nullptr;
 }
 
-void HTMLCanvasElement::releaseImageBufferAndContext()
-{
-    m_contextStateSaver = nullptr;
-    setImageBuffer(nullptr);
-}
-
 void HTMLCanvasElement::setSurfaceSize(const IntSize& size)
 {
-    m_size = size;
+    CanvasBase::setSize(size);
     m_hasCreatedImageBuffer = false;
-    releaseImageBufferAndContext();
+    setImageBuffer(nullptr);
     clearCopiedImage();
 }
 
@@ -688,7 +708,7 @@ ExceptionOr<UncachedString> HTMLCanvasElement::toDataURL(const String& mimeType,
     if (!originClean())
         return Exception { SecurityError };
 
-    if (m_size.isEmpty() || !buffer())
+    if (size().isEmpty() || !buffer())
         return UncachedString { "data:,"_s };
     if (RuntimeEnabledFeatures::sharedFeatures().webAPIStatisticsEnabled())
         ResourceLoadObserver::shared().logCanvasRead(document());
@@ -717,7 +737,7 @@ ExceptionOr<void> HTMLCanvasElement::toBlob(ScriptExecutionContext& context, Ref
     if (!originClean())
         return Exception { SecurityError };
 
-    if (m_size.isEmpty() || !buffer()) {
+    if (size().isEmpty() || !buffer()) {
         callback->scheduleCallback(context, nullptr);
         return { };
     }
@@ -732,7 +752,7 @@ ExceptionOr<void> HTMLCanvasElement::toBlob(ScriptExecutionContext& context, Ref
         RefPtr<Blob> blob;
         Vector<uint8_t> blobData = data(*imageData, encodingMIMEType, quality);
         if (!blobData.isEmpty())
-            blob = Blob::create(context.sessionID(), WTFMove(blobData), encodingMIMEType);
+            blob = Blob::create(WTFMove(blobData), encodingMIMEType);
         callback->scheduleCallback(context, WTFMove(blob));
         return { };
     }
@@ -743,7 +763,7 @@ ExceptionOr<void> HTMLCanvasElement::toBlob(ScriptExecutionContext& context, Ref
     RefPtr<Blob> blob;
     Vector<uint8_t> blobData = buffer()->toData(encodingMIMEType, quality);
     if (!blobData.isEmpty())
-        blob = Blob::create(context.sessionID(), WTFMove(blobData), encodingMIMEType);
+        blob = Blob::create(WTFMove(blobData), encodingMIMEType);
     callback->scheduleCallback(context, WTFMove(blob));
     return { };
 }
@@ -773,6 +793,9 @@ RefPtr<MediaSample> HTMLCanvasElement::toMediaSample()
 #if PLATFORM(COCOA)
     makeRenderingResultsAvailable();
     return MediaSampleAVFObjC::createImageSample(imageBuffer->toBGRAData(), width(), height());
+#elif USE(GSTREAMER)
+    makeRenderingResultsAvailable();
+    return MediaSampleGStreamer::createImageSample(imageBuffer->toBGRAData(), width(), height());
 #else
     return nullptr;
 #endif
@@ -830,69 +853,50 @@ bool HTMLCanvasElement::shouldAccelerate(const IntSize& size) const
 #endif
 }
 
-size_t HTMLCanvasElement::memoryCost() const
-{
-    // memoryCost() may be invoked concurrently from a GC thread, and we need to be careful
-    // about what data we access here and how. We need to hold a lock to prevent m_imageBuffer
-    // from being changed while we access it.
-    auto locker = holdLock(m_imageBufferAssignmentLock);
-    if (!m_imageBuffer)
-        return 0;
-    return m_imageBuffer->memoryCost();
-}
-
-size_t HTMLCanvasElement::externalMemoryCost() const
-{
-    // externalMemoryCost() may be invoked concurrently from a GC thread, and we need to be careful
-    // about what data we access here and how. We need to hold a lock to prevent m_imageBuffer
-    // from being changed while we access it.
-    auto locker = holdLock(m_imageBufferAssignmentLock);
-    if (!m_imageBuffer)
-        return 0;
-    return m_imageBuffer->externalMemoryCost();
-}
-
 void HTMLCanvasElement::setUsesDisplayListDrawing(bool usesDisplayListDrawing)
 {
-    if (usesDisplayListDrawing == m_usesDisplayListDrawing)
-        return;
-
     m_usesDisplayListDrawing = usesDisplayListDrawing;
-
-    if (is<CanvasRenderingContext2D>(m_context.get()))
-        downcast<CanvasRenderingContext2D>(*m_context).setUsesDisplayListDrawing(m_usesDisplayListDrawing);
 }
 
 void HTMLCanvasElement::setTracksDisplayListReplay(bool tracksDisplayListReplay)
 {
-    if (tracksDisplayListReplay == m_tracksDisplayListReplay)
-        return;
-
     m_tracksDisplayListReplay = tracksDisplayListReplay;
 
-    if (is<CanvasRenderingContext2D>(m_context.get()))
-        downcast<CanvasRenderingContext2D>(*m_context).setTracksDisplayListReplay(m_tracksDisplayListReplay);
+    if (!buffer())
+        return;
+
+    auto& buffer = *this->buffer();
+    if (buffer.drawingContext())
+        buffer.drawingContext()->setTracksDisplayListReplay(m_tracksDisplayListReplay);
 }
 
 String HTMLCanvasElement::displayListAsText(DisplayList::AsTextFlags flags) const
 {
-    if (is<CanvasRenderingContext2D>(m_context.get()))
-        return downcast<CanvasRenderingContext2D>(*m_context).displayListAsText(flags);
+    if (!buffer())
+        return String();
+
+    auto& buffer = *this->buffer();
+    if (buffer.drawingContext())
+        return buffer.drawingContext()->displayList().asText(flags);
 
     return String();
 }
 
 String HTMLCanvasElement::replayDisplayListAsText(DisplayList::AsTextFlags flags) const
 {
-    if (is<CanvasRenderingContext2D>(m_context.get()))
-        return downcast<CanvasRenderingContext2D>(*m_context).replayDisplayListAsText(flags);
+    if (!buffer())
+        return String();
+
+    auto& buffer = *this->buffer();
+    if (buffer.drawingContext() && buffer.drawingContext()->replayedDisplayList())
+        return buffer.drawingContext()->replayedDisplayList()->asText(flags);
 
     return String();
 }
 
 void HTMLCanvasElement::createImageBuffer() const
 {
-    ASSERT(!m_imageBuffer);
+    ASSERT(!hasCreatedImageBuffer());
 
     m_hasCreatedImageBuffer = true;
     m_didClearImageBuffer = true;
@@ -909,7 +913,7 @@ void HTMLCanvasElement::createImageBuffer() const
 
     // Make sure we don't use more pixel memory than the system can support.
     size_t requestedPixelMemory = 4 * width() * height();
-    if (activePixelMemory + requestedPixelMemory > maxActivePixelMemory()) {
+    if (activePixelMemory() + requestedPixelMemory > maxActivePixelMemory()) {
         StringBuilder stringBuilder;
         stringBuilder.appendLiteral("Total canvas memory use exceeds the maximum limit (");
         stringBuilder.appendNumber(maxActivePixelMemory() / 1024 / 1024);
@@ -921,41 +925,15 @@ void HTMLCanvasElement::createImageBuffer() const
     if (!width() || !height())
         return;
 
-    RenderingMode renderingMode = shouldAccelerate(size()) ? Accelerated : Unaccelerated;
-
     auto hostWindow = (document().view() && document().view()->root()) ? document().view()->root()->hostWindow() : nullptr;
-    setImageBuffer(ImageBuffer::create(size(), renderingMode, 1, ColorSpaceSRGB, hostWindow));
-}
 
-void HTMLCanvasElement::setImageBuffer(std::unique_ptr<ImageBuffer>&& buffer) const
-{
-    size_t previousMemoryCost = memoryCost();
-    removeFromActivePixelMemory(previousMemoryCost);
+    auto accelerate = shouldAccelerate(size()) ? ShouldAccelerate::Yes : ShouldAccelerate::No;
+    // FIXME: Add a new setting for DisplayList drawing on canvas.
+    auto useDisplayList = m_usesDisplayListDrawing.valueOr(document().settings().displayListDrawingEnabled()) ? ShouldUseDisplayList::Yes : ShouldUseDisplayList::No;
+    setImageBuffer(ImageBuffer::create(size(), accelerate, useDisplayList, RenderingPurpose::Canvas, 1, ColorSpace::SRGB, hostWindow));
 
-    {
-        auto locker = holdLock(m_imageBufferAssignmentLock);
-        m_contextStateSaver = nullptr;
-        m_imageBuffer = WTFMove(buffer);
-    }
-
-    if (m_imageBuffer && m_size != m_imageBuffer->internalSize())
-        m_size = m_imageBuffer->internalSize();
-
-    size_t currentMemoryCost = memoryCost();
-    activePixelMemory += currentMemoryCost;
-
-    if (m_context && m_imageBuffer && previousMemoryCost != currentMemoryCost)
-        InspectorInstrumentation::didChangeCanvasMemory(*m_context);
-
-    if (!m_imageBuffer)
-        return;
-    m_imageBuffer->context().setShadowsIgnoreTransforms(true);
-    m_imageBuffer->context().setImageInterpolationQuality(defaultInterpolationQuality);
-    m_imageBuffer->context().setStrokeThickness(1);
-    m_contextStateSaver = makeUnique<GraphicsContextStateSaver>(m_imageBuffer->context());
-
-    JSC::JSLockHolder lock(HTMLElement::scriptExecutionContext()->vm());
-    HTMLElement::scriptExecutionContext()->vm().heap.reportExtraMemoryAllocated(memoryCost());
+    if (buffer() && buffer()->drawingContext())
+        buffer()->drawingContext()->setTracksDisplayListReplay(m_tracksDisplayListReplay);
 
 #if USE(IOSURFACE_CANVAS_BACKING_STORE) || ENABLE(ACCELERATED_2D_CANVAS)
     if (m_context && m_context->is2d()) {
@@ -969,30 +947,7 @@ void HTMLCanvasElement::setImageBufferAndMarkDirty(std::unique_ptr<ImageBuffer>&
 {
     m_hasCreatedImageBuffer = true;
     setImageBuffer(WTFMove(buffer));
-    didDraw(FloatRect(FloatPoint(), m_size));
-}
-
-GraphicsContext* HTMLCanvasElement::drawingContext() const
-{
-    if (m_context && !m_context->is2d())
-        return nullptr;
-
-    return buffer() ? &m_imageBuffer->context() : nullptr;
-}
-
-GraphicsContext* HTMLCanvasElement::existingDrawingContext() const
-{
-    if (!m_hasCreatedImageBuffer)
-        return nullptr;
-
-    return drawingContext();
-}
-
-ImageBuffer* HTMLCanvasElement::buffer() const
-{
-    if (!m_hasCreatedImageBuffer)
-        createImageBuffer();
-    return m_imageBuffer.get();
+    didDraw(FloatRect(FloatPoint(), size()));
 }
 
 Image* HTMLCanvasElement::copiedImage() const
@@ -1025,10 +980,76 @@ void HTMLCanvasElement::clearCopiedImage()
     m_didClearImageBuffer = false;
 }
 
-AffineTransform HTMLCanvasElement::baseTransform() const
+const char* HTMLCanvasElement::activeDOMObjectName() const
 {
-    ASSERT(m_hasCreatedImageBuffer);
-    return m_imageBuffer->baseTransform();
+    return "HTMLCanvasElement";
+}
+
+bool HTMLCanvasElement::virtualHasPendingActivity() const
+{
+#if ENABLE(WEBGL)
+    if (is<WebGLRenderingContextBase>(m_context.get())) {
+        // WebGL rendering context may fire contextlost / contextchange / contextrestored events at any point.
+        return m_hasRelevantWebGLEventListener && !downcast<WebGLRenderingContextBase>(*m_context).isContextUnrecoverablyLost();
+    }
+#endif
+
+    return false;
+}
+
+void HTMLCanvasElement::eventListenersDidChange()
+{
+#if ENABLE(WEBGL)
+    m_hasRelevantWebGLEventListener = hasEventListeners(eventNames().webglcontextchangedEvent)
+        || hasEventListeners(eventNames().webglcontextlostEvent)
+        || hasEventListeners(eventNames().webglcontextrestoredEvent);
+#endif
+}
+
+void HTMLCanvasElement::didMoveToNewDocument(Document& oldDocument, Document& newDocument)
+{
+    oldDocument.clearCanvasPreparation(this);
+    removeObserver(oldDocument);
+    addObserver(newDocument);
+
+    HTMLElement::didMoveToNewDocument(oldDocument, newDocument);
+}
+
+Node::InsertedIntoAncestorResult HTMLCanvasElement::insertedIntoAncestor(InsertionType insertionType, ContainerNode& parentOfInsertedTree)
+{
+    if (insertionType.connectedToDocument)
+        addObserver(parentOfInsertedTree.document());
+
+    return HTMLElement::insertedIntoAncestor(insertionType, parentOfInsertedTree);
+}
+
+void HTMLCanvasElement::removedFromAncestor(RemovalType removalType, ContainerNode& oldParentOfRemovedTree)
+{
+    if (removalType.disconnectedFromDocument) {
+        oldParentOfRemovedTree.document().clearCanvasPreparation(this);
+        removeObserver(oldParentOfRemovedTree.document());
+    }
+
+    HTMLElement::removedFromAncestor(removalType, oldParentOfRemovedTree);
+}
+
+bool HTMLCanvasElement::needsPreparationForDisplay()
+{
+#if ENABLE(WEBGL)
+    return is<WebGLRenderingContextBase>(m_context.get());
+#else
+    return false;
+#endif
+}
+
+void HTMLCanvasElement::prepareForDisplay()
+{
+#if ENABLE(WEBGL)
+    ASSERT(needsPreparationForDisplay());
+
+    if (is<WebGLRenderingContextBase>(m_context.get()))
+        downcast<WebGLRenderingContextBase>(m_context.get())->prepareForDisplay();
+#endif
 }
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -55,7 +55,7 @@ public:
     // created Page has its show method called.
     // The FrameLoadRequest parameter is only for ChromeClient to check if the
     // request could be fulfilled. The ChromeClient should not load the request.
-    Page* createWindow(Frame&, const FrameLoadRequest&, const WindowFeatures&, const NavigationAction&) override;
+    Page* createWindow(Frame&, const WindowFeatures&, const NavigationAction&) override;
     void show() override;
 
     bool canRunModal() override;
@@ -107,9 +107,9 @@ public:
     // End methods used by HostWindow.
 
     void contentsSizeChanged(Frame&, const IntSize&) const override;
-    void mouseDidMoveOverElement(const HitTestResult&, unsigned modifierFlags) override;
+    void mouseDidMoveOverElement(const HitTestResult&, unsigned modifierFlags, const String& toolTip, TextDirection) override;
 
-    void setToolTip(const String&, TextDirection) override;
+    void setToolTip(const String&);
 
     void print(Frame&) override;
 
@@ -154,7 +154,7 @@ public:
     void setNeedsOneShotDrawingSynchronization() override;
     // Sets a flag to specify that the view needs to be updated, so we need
     // to do an eager layout before the drawing.
-    void scheduleCompositingLayerFlush() override;
+    void scheduleRenderingUpdate() override;
     void attachViewOverlayGraphicsLayer(GraphicsLayer*) override;
 
 #if ENABLE(TOUCH_EVENTS)

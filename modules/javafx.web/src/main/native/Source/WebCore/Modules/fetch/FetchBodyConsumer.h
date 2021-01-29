@@ -32,7 +32,7 @@
 #include "JSDOMPromiseDeferred.h"
 #include "ReadableStreamSink.h"
 #include "SharedBuffer.h"
-#include <pal/SessionID.h>
+#include "UserGestureIndicator.h"
 
 namespace WebCore {
 
@@ -44,7 +44,7 @@ class FetchBodyConsumer {
 public:
     enum class Type { None, ArrayBuffer, Blob, JSON, Text };
 
-    FetchBodyConsumer(Type type) : m_type(type) { }
+    explicit FetchBodyConsumer(Type type) : m_type(type) { }
 
     void append(const char* data, unsigned);
     void append(const unsigned char* data, unsigned);
@@ -75,7 +75,8 @@ public:
     void setAsLoading() { m_isLoading = true; }
 
 private:
-    Ref<Blob> takeAsBlob(PAL::SessionID);
+    Ref<Blob> takeAsBlob();
+    void resetConsumePromise();
 
     Type m_type;
     String m_contentType;
@@ -84,6 +85,7 @@ private:
     RefPtr<ReadableStreamToSharedBufferSink> m_sink;
     RefPtr<FetchBodySource> m_source;
     bool m_isLoading { false };
+    RefPtr<UserGestureToken> m_userGestureToken;
 };
 
 } // namespace WebCore

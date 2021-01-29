@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2006-2017 Apple Inc. All rights reserved.
+ * Copyright (C) 2006-2020 Apple Inc. All rights reserved.
  * Copyright (C) 2012 Google Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -34,7 +34,7 @@
 #include "LayoutMilestone.h"
 #include "LinkIcon.h"
 #include "PageIdentifier.h"
-#include <functional>
+#include <wtf/Expected.h>
 #include <wtf/Forward.h>
 #include <wtf/WallTime.h>
 #include <wtf/text/WTFString.h>
@@ -63,10 +63,6 @@ OBJC_CLASS NSDictionary;
 OBJC_CLASS NSView;
 #endif
 
-namespace PAL {
-class SessionID;
-}
-
 namespace WebCore {
 
 class AuthenticationChallenge;
@@ -88,12 +84,13 @@ class HTMLFrameOwnerElement;
 class HTMLPlugInElement;
 class HistoryItem;
 class IntSize;
+class LegacyPreviewLoaderClient;
 class MessageEvent;
 class NavigationAction;
 class Page;
 class PluginViewBase;
-class PreviewLoaderClient;
 class ProtectionSpace;
+class RegistrableDomain;
 class RTCPeerConnectionHandler;
 class ResourceError;
 class ResourceHandle;
@@ -106,6 +103,7 @@ class Widget;
 
 enum class LockBackForwardList : bool;
 enum class PolicyDecisionMode;
+enum class UsedLegacyTLS : bool;
 
 struct StringWithDirection;
 
@@ -122,19 +120,16 @@ public:
 
     virtual ~FrameLoaderClient() = default;
 
-    virtual void frameLoaderDestroyed() = 0;
-
     virtual bool hasWebView() const = 0; // mainly for assertions
 
     virtual void makeRepresentation(DocumentLoader*) = 0;
 
     virtual Optional<PageIdentifier> pageID() const = 0;
     virtual Optional<FrameIdentifier> frameID() const = 0;
-    virtual PAL::SessionID sessionID() const = 0;
 
 #if PLATFORM(IOS_FAMILY)
     // Returns true if the client forced the layout.
-    virtual bool forceLayoutOnRestoreFromPageCache() = 0;
+    virtual bool forceLayoutOnRestoreFromBackForwardCache() = 0;
 #endif
     virtual void forceLayoutForNonHTML() = 0;
 
@@ -178,18 +173,19 @@ public:
     virtual void dispatchDidReceiveIcon() { }
     virtual void dispatchDidStartProvisionalLoad() = 0;
     virtual void dispatchDidReceiveTitle(const StringWithDirection&) = 0;
-    virtual void dispatchDidCommitLoad(Optional<HasInsecureContent>) = 0;
+    virtual void dispatchDidCommitLoad(Optional<HasInsecureContent>, Optional<UsedLegacyTLS>) = 0;
     virtual void dispatchDidFailProvisionalLoad(const ResourceError&, WillContinueLoading) = 0;
     virtual void dispatchDidFailLoad(const ResourceError&) = 0;
     virtual void dispatchDidFinishDocumentLoad() = 0;
     virtual void dispatchDidFinishLoad() = 0;
-    virtual void dispatchDidExplicitOpen(const URL&) { }
+    virtual void dispatchDidExplicitOpen(const URL&, const String& /* mimeType */) { }
 #if ENABLE(DATA_DETECTION)
     virtual void dispatchDidFinishDataDetection(NSArray *detectionResults) = 0;
 #endif
 
     virtual void dispatchDidLayout() { }
     virtual void dispatchDidReachLayoutMilestone(OptionSet<LayoutMilestone>) { }
+    virtual void dispatchDidReachVisuallyNonEmptyState() { }
 
     virtual Frame* dispatchCreatePage(const NavigationAction&) = 0;
     virtual void dispatchShow() = 0;
@@ -240,20 +236,20 @@ public:
     virtual void didRunInsecureContent(SecurityOrigin&, const URL&) = 0;
     virtual void didDetectXSS(const URL&, bool didBlockEntirePage) = 0;
 
-    virtual ResourceError cancelledError(const ResourceRequest&) = 0;
-    virtual ResourceError blockedError(const ResourceRequest&) = 0;
-    virtual ResourceError blockedByContentBlockerError(const ResourceRequest&) = 0;
-    virtual ResourceError cannotShowURLError(const ResourceRequest&) = 0;
-    virtual ResourceError interruptedForPolicyChangeError(const ResourceRequest&) = 0;
+    virtual ResourceError cancelledError(const ResourceRequest&) const = 0;
+    virtual ResourceError blockedError(const ResourceRequest&) const = 0;
+    virtual ResourceError blockedByContentBlockerError(const ResourceRequest&) const = 0;
+    virtual ResourceError cannotShowURLError(const ResourceRequest&) const = 0;
+    virtual ResourceError interruptedForPolicyChangeError(const ResourceRequest&) const = 0;
 #if ENABLE(CONTENT_FILTERING)
-    virtual ResourceError blockedByContentFilterError(const ResourceRequest&) = 0;
+    virtual ResourceError blockedByContentFilterError(const ResourceRequest&) const = 0;
 #endif
 
-    virtual ResourceError cannotShowMIMETypeError(const ResourceResponse&) = 0;
-    virtual ResourceError fileDoesNotExistError(const ResourceResponse&) = 0;
-    virtual ResourceError pluginWillHandleLoadError(const ResourceResponse&) = 0;
+    virtual ResourceError cannotShowMIMETypeError(const ResourceResponse&) const = 0;
+    virtual ResourceError fileDoesNotExistError(const ResourceResponse&) const = 0;
+    virtual ResourceError pluginWillHandleLoadError(const ResourceResponse&) const = 0;
 
-    virtual bool shouldFallBack(const ResourceError&) = 0;
+    virtual bool shouldFallBack(const ResourceError&) const = 0;
 
     virtual bool canHandleRequest(const ResourceRequest&) const = 0;
     virtual bool canShowMIMEType(const String& MIMEType) const = 0;
@@ -272,7 +268,7 @@ public:
     virtual void updateCachedDocumentLoader(DocumentLoader&) = 0;
     virtual void setTitle(const StringWithDirection&, const URL&) = 0;
 
-    virtual String userAgent(const URL&) = 0;
+    virtual String userAgent(const URL&) const = 0;
 
     virtual String overrideContentSecurityPolicy() const { return String(); }
 
@@ -283,15 +279,12 @@ public:
 #endif
     virtual void transitionToCommittedForNewPage() = 0;
 
-    virtual void didSaveToPageCache() = 0;
-    virtual void didRestoreFromPageCache() = 0;
-
-    virtual void dispatchDidBecomeFrameset(bool) = 0; // Can change due to navigation or DOM modification.
+    virtual void didRestoreFromBackForwardCache() = 0;
 
     virtual bool canCachePage() const = 0;
-    virtual void convertMainResourceLoadToDownload(DocumentLoader*, PAL::SessionID, const ResourceRequest&, const ResourceResponse&) = 0;
+    virtual void convertMainResourceLoadToDownload(DocumentLoader*, const ResourceRequest&, const ResourceResponse&) = 0;
 
-    virtual RefPtr<Frame> createFrame(const URL&, const String& name, HTMLFrameOwnerElement&, const String& referrer) = 0;
+    virtual RefPtr<Frame> createFrame(const String& name, HTMLFrameOwnerElement&) = 0;
     virtual RefPtr<Widget> createPlugin(const IntSize&, HTMLPlugInElement&, const URL&, const Vector<String>&, const Vector<String>&, const String&, bool loadManually) = 0;
     virtual void redirectDataToPlugin(Widget&) = 0;
 
@@ -344,22 +337,23 @@ public:
 #if ENABLE(WEBGL)
     virtual bool allowWebGL(bool enabledPerSettings) { return enabledPerSettings; }
     // Informs the embedder that a WebGL canvas inside this frame received a lost context
-    // notification with the given GL_ARB_robustness guilt/innocence code (see Extensions3D.h).
+    // notification with the given GL_ARB_robustness guilt/innocence code (see ExtensionsGL.h).
     virtual void didLoseWebGLContext(int) { }
-    virtual WebGLLoadPolicy webGLPolicyForURL(const URL&) const { return WebGLAllowCreation; }
-    virtual WebGLLoadPolicy resolveWebGLPolicyForURL(const URL&) const { return WebGLAllowCreation; }
+    virtual WebGLLoadPolicy webGLPolicyForURL(const URL&) const { return WebGLLoadPolicy::WebGLAllowCreation; }
+    virtual WebGLLoadPolicy resolveWebGLPolicyForURL(const URL&) const { return WebGLLoadPolicy::WebGLAllowCreation; }
 #endif
 
-    virtual void forcePageTransitionIfNeeded() { }
+    virtual void completePageTransitionIfNeeded() { }
 
     // FIXME (bug 116233): We need to get rid of EmptyFrameLoaderClient completely, then this will no longer be needed.
-    virtual bool isEmptyFrameLoaderClient() { return false; }
+    virtual bool isEmptyFrameLoaderClient() const { return false; }
+    virtual bool isServiceWorkerFrameLoaderClient() const { return false; }
 
 #if PLATFORM(JAVA)
         virtual bool isJavaFrameLoaderClient() { return false; }
 #endif
 #if USE(QUICK_LOOK)
-    virtual RefPtr<PreviewLoaderClient> createPreviewLoaderClient(const String&, const String&) = 0;
+    virtual RefPtr<LegacyPreviewLoaderClient> createPreviewLoaderClient(const String&, const String&) = 0;
 #endif
 
 #if ENABLE(CONTENT_FILTERING)
@@ -367,6 +361,7 @@ public:
 #endif
 
     virtual void prefetchDNS(const String&) = 0;
+    virtual void sendH2Ping(const URL&, CompletionHandler<void(Expected<Seconds, ResourceError>&&)>&&) = 0;
 
     virtual void didRestoreScrollPosition() { }
 
@@ -381,8 +376,13 @@ public:
 
 #if ENABLE(RESOURCE_LOAD_STATISTICS)
     virtual bool hasFrameSpecificStorageAccess() { return false; }
-    virtual void setHasFrameSpecificStorageAccess(bool) { }
+    virtual void didLoadFromRegistrableDomain(RegistrableDomain&&) { }
 #endif
+
+    virtual AllowsContentJavaScript allowsContentJavaScriptFromMostRecentNavigation() const { return AllowsContentJavaScript::Yes; }
+
+    virtual bool shouldEnableInAppBrowserPrivacyProtections() const { return false; }
+    virtual void notifyPageOfAppBoundBehavior() { }
 };
 
 } // namespace WebCore

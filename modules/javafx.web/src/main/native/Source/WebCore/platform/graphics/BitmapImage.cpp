@@ -39,6 +39,10 @@
 #include <wtf/text/TextStream.h>
 #include <wtf/text/WTFString.h>
 
+#if USE(CG)
+#include <pal/spi/cg/CoreGraphicsSPI.h>
+#endif
+
 namespace WebCore {
 
 BitmapImage::BitmapImage(ImageObserver* observer)
@@ -147,6 +151,25 @@ NativeImagePtr BitmapImage::nativeImageForCurrentFrame(const GraphicsContext* ta
     return frameImageAtIndexCacheIfNeeded(m_currentFrame, SubsamplingLevel::Default, targetContext);
 }
 
+NativeImagePtr BitmapImage::nativeImageForCurrentFrameRespectingOrientation(const GraphicsContext* targetContext)
+{
+    auto image = nativeImageForCurrentFrame(targetContext);
+
+    ImageOrientation orientation = orientationForCurrentFrame();
+    if (orientation == ImageOrientation::None)
+        return image;
+
+    FloatRect rect = { FloatPoint(), size() };
+    auto buffer = ImageBuffer::create(rect.size(), RenderingMode::Unaccelerated);
+    if (!buffer)
+        return image;
+
+#if USE(CG) || USE(DIRECT2D) || USE(CAIRO)
+    buffer->context().drawNativeImage(image, rect.size(), rect, rect, { orientation });
+#endif
+    return ImageBuffer::sinkIntoNativeImage(WTFMove(buffer));
+}
+
 #if USE(CG)
 NativeImagePtr BitmapImage::nativeImageOfSize(const IntSize& size, const GraphicsContext* targetContext)
 {
@@ -176,12 +199,12 @@ Vector<NativeImagePtr> BitmapImage::framesNativeImages()
 }
 #endif
 
-#if !ASSERT_DISABLED
+#if ASSERT_ENABLED
 bool BitmapImage::notSolidColor()
 {
     return size().width() != 1 || size().height() != 1 || frameCount() > 1;
 }
-#endif
+#endif // ASSERT_ENABLED
 
 ImageDrawResult BitmapImage::draw(GraphicsContext& context, const FloatRect& destRect, const FloatRect& srcRect, const ImagePaintingOptions& options)
 {
@@ -189,7 +212,7 @@ ImageDrawResult BitmapImage::draw(GraphicsContext& context, const FloatRect& des
         return ImageDrawResult::DidNothing;
 
     FloatSize scaleFactorForDrawing = context.scaleFactorForDrawing(destRect, srcRect);
-    IntSize sizeForDrawing = expandedIntSize(size() * scaleFactorForDrawing);
+    IntSize sizeForDrawing = expandedIntSize(size(ImageOrientation::None) * scaleFactorForDrawing);
     ImageDrawResult result = ImageDrawResult::DidDraw;
 
     m_currentSubsamplingLevel = m_allowSubsampling ? subsamplingLevelForScaleFactor(context, scaleFactorForDrawing) : SubsamplingLevel::Default;
@@ -216,7 +239,7 @@ ImageDrawResult BitmapImage::draw(GraphicsContext& context, const FloatRect& des
 
         if (!frameHasDecodedNativeImageCompatibleWithOptionsAtIndex(m_currentFrame, m_currentSubsamplingLevel, DecodingOptions(DecodingMode::Asynchronous))) {
             if (m_showDebugBackground)
-                fillWithSolidColor(context, destRect, Color(Color::yellow).colorWithAlpha(0.5), options.compositeOperator());
+                fillWithSolidColor(context, destRect, Color::yellow.colorWithAlphaByte(128), options.compositeOperator());
             return result;
         }
 
@@ -227,7 +250,7 @@ ImageDrawResult BitmapImage::draw(GraphicsContext& context, const FloatRect& des
         ASSERT_IMPLIES(status == StartAnimationStatus::DecodingActive, (!m_currentFrame && !m_repetitionsComplete) || frameHasFullSizeNativeImageAtIndex(m_currentFrame, m_currentSubsamplingLevel));
 
         if (status == StartAnimationStatus::DecodingActive && m_showDebugBackground) {
-            fillWithSolidColor(context, destRect, Color(Color::yellow).colorWithAlpha(0.5), options.compositeOperator());
+            fillWithSolidColor(context, destRect, Color::yellow.colorWithAlphaByte(128), options.compositeOperator());
             return result;
         }
 
@@ -245,7 +268,7 @@ ImageDrawResult BitmapImage::draw(GraphicsContext& context, const FloatRect& des
         } else if (frameIsBeingDecoded) {
             // FIXME: instead of showing the yellow rectangle and returning we need to wait for this frame to finish decoding.
             if (m_showDebugBackground) {
-                fillWithSolidColor(context, destRect, Color(Color::yellow).colorWithAlpha(0.5), options.compositeOperator());
+                fillWithSolidColor(context, destRect, Color::yellow.colorWithAlphaByte(128), options.compositeOperator());
                 LOG(Images, "BitmapImage::%s - %p - url: %s [waiting for async decoding to finish]", __FUNCTION__, this, sourceURL().string().utf8().data());
             }
             return ImageDrawResult::DidRequestDecoding;
@@ -268,10 +291,12 @@ ImageDrawResult BitmapImage::draw(GraphicsContext& context, const FloatRect& des
         return result;
     }
 
-    if (options.orientation() == ImageOrientation::FromImage)
-        drawNativeImage(image, context, destRect, srcRect, IntSize(size()), { options, frameOrientationAtIndex(m_currentFrame) });
-    else
-        drawNativeImage(image, context, destRect, srcRect, IntSize(size()), options);
+    auto orientation = options.orientation();
+    if (orientation == ImageOrientation::FromImage) {
+        orientation = frameOrientationAtIndex(m_currentFrame);
+        drawNativeImage(image, context, destRect, srcRect, IntSize(size(orientation)), { options, orientation });
+    } else
+        drawNativeImage(image, context, destRect, srcRect, IntSize(size(orientation)), options);
 
     m_currentFrameDecodingStatus = frameDecodingStatusAtIndex(m_currentFrame);
 
@@ -291,13 +316,13 @@ void BitmapImage::drawPattern(GraphicsContext& ctxt, const FloatRect& destRect, 
         if (m_currentFrameDecodingStatus == DecodingStatus::Invalid)
             m_source->destroyIncompleteDecodedData();
 
-        Image::drawPattern(ctxt, destRect, tileRect, transform, phase, spacing, options);
+        Image::drawPattern(ctxt, destRect, tileRect, transform, phase, spacing, { options, ImageOrientation::FromImage });
         m_currentFrameDecodingStatus = frameDecodingStatusAtIndex(m_currentFrame);
         return;
     }
 
     if (!m_cachedImage) {
-        auto buffer = ImageBuffer::createCompatibleBuffer(expandedIntSize(tileRect.size()), ColorSpaceSRGB, ctxt);
+        auto buffer = ImageBuffer::createCompatibleBuffer(expandedIntSize(tileRect.size()), ColorSpace::SRGB, ctxt);
         if (!buffer)
             return;
 
@@ -306,7 +331,7 @@ void BitmapImage::drawPattern(GraphicsContext& ctxt, const FloatRect& destRect, 
         // Temporarily reset image observer, we don't want to receive any changeInRect() calls due to this relayout.
         setImageObserver(nullptr);
 
-        draw(buffer->context(), tileRect, tileRect, { options, DecodingMode::Synchronous, ImageOrientation::None });
+        draw(buffer->context(), tileRect, tileRect, { options, DecodingMode::Synchronous, ImageOrientation::FromImage });
 
         setImageObserver(observer);
         buffer->convertToLuminanceMask();
@@ -317,7 +342,7 @@ void BitmapImage::drawPattern(GraphicsContext& ctxt, const FloatRect& destRect, 
     }
 
     ctxt.setDrawLuminanceMask(false);
-    m_cachedImage->drawPattern(ctxt, destRect, tileRect, transform, phase, spacing, options);
+    m_cachedImage->drawPattern(ctxt, destRect, tileRect, transform, phase, spacing, { options, ImageOrientation::FromImage });
 }
 
 bool BitmapImage::shouldAnimate() const

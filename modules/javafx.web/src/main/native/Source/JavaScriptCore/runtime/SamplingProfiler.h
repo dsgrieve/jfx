@@ -105,7 +105,7 @@ public:
 
             bool hasBytecodeIndex() const
             {
-                return bytecodeIndex != std::numeric_limits<unsigned>::max();
+                return !!bytecodeIndex;
             }
 
             bool hasExpressionInfo() const
@@ -117,7 +117,7 @@ public:
             // These attempt to be expression-level line and column number.
             unsigned lineNumber { std::numeric_limits<unsigned>::max() };
             unsigned columnNumber { std::numeric_limits<unsigned>::max() };
-            unsigned bytecodeIndex { std::numeric_limits<unsigned>::max() };
+            BytecodeIndex bytecodeIndex;
             CodeBlockHash codeBlockHash;
             JITType jitType { JITType::None };
         };
@@ -166,7 +166,7 @@ public:
         { }
     };
 
-    SamplingProfiler(VM&, RefPtr<Stopwatch>&&);
+    SamplingProfiler(VM&, Ref<Stopwatch>&&);
     ~SamplingProfiler();
     void noticeJSLockAcquisition();
     void noticeVMEntry();
@@ -180,7 +180,7 @@ public:
     JS_EXPORT_PRIVATE String stackTracesAsJSON();
     JS_EXPORT_PRIVATE void noticeCurrentThreadAsJSCExecutionThread();
     void noticeCurrentThreadAsJSCExecutionThread(const AbstractLocker&);
-    void processUnverifiedStackTraces(); // You should call this only after acquiring the lock.
+    void processUnverifiedStackTraces(const AbstractLocker&);
     void setStopWatch(const AbstractLocker&, Ref<Stopwatch>&& stopwatch) { m_stopwatch = WTFMove(stopwatch); }
     void pause(const AbstractLocker&);
     void clearData(const AbstractLocker&);
@@ -193,9 +193,7 @@ public:
     JS_EXPORT_PRIVATE void reportTopBytecodes();
     JS_EXPORT_PRIVATE void reportTopBytecodes(PrintStream&);
 
-#if OS(DARWIN)
-    JS_EXPORT_PRIVATE mach_port_t machThread();
-#endif
+    JS_EXPORT_PRIVATE Thread* thread() const;
 
 private:
     void createThreadIfNecessary(const AbstractLocker&);
@@ -208,7 +206,7 @@ private:
     bool m_needsReportAtExit { false };
     VM& m_vm;
     WeakRandom m_weakRandom;
-    RefPtr<Stopwatch> m_stopwatch;
+    Ref<Stopwatch> m_stopwatch;
     Vector<StackTrace> m_stackTraces;
     Vector<UnprocessedStackTrace> m_unprocessedStackTraces;
     Seconds m_timingInterval;

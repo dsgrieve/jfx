@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2018 Apple Inc. All rights reserved.
+ * Copyright (C) 2008-2020 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -37,16 +37,18 @@ namespace JSC {
 
 class MacroAssemblerX86_64 : public MacroAssemblerX86Common {
 public:
-    static const unsigned numGPRs = 16;
-    static const unsigned numFPRs = 16;
+    static constexpr unsigned numGPRs = 16;
+    static constexpr unsigned numFPRs = 16;
 
-    static const Scale ScalePtr = TimesEight;
+    static constexpr RegisterID InvalidGPRReg = X86Registers::InvalidGPRReg;
 
     using MacroAssemblerX86Common::add32;
     using MacroAssemblerX86Common::and32;
     using MacroAssemblerX86Common::branch32;
     using MacroAssemblerX86Common::branchAdd32;
     using MacroAssemblerX86Common::or32;
+    using MacroAssemblerX86Common::or16;
+    using MacroAssemblerX86Common::or8;
     using MacroAssemblerX86Common::sub32;
     using MacroAssemblerX86Common::load8;
     using MacroAssemblerX86Common::load32;
@@ -87,6 +89,18 @@ public:
     {
         move(TrustedImmPtr(address.m_ptr), scratchRegister());
         or32(reg, Address(scratchRegister()));
+    }
+
+    void or16(TrustedImm32 imm, AbsoluteAddress address)
+    {
+        move(TrustedImmPtr(address.m_ptr), scratchRegister());
+        or16(imm, Address(scratchRegister()));
+    }
+
+    void or8(TrustedImm32 imm, AbsoluteAddress address)
+    {
+        move(TrustedImmPtr(address.m_ptr), scratchRegister());
+        or8(imm, Address(scratchRegister()));
     }
 
     void sub32(TrustedImm32 imm, AbsoluteAddress address)
@@ -239,6 +253,12 @@ public:
 #endif
         ASSERT_UNUSED(label, differenceBetween(label, result) == REPATCH_OFFSET_CALL_R11);
         return result;
+    }
+
+    void callOperation(const FunctionPtr<OperationPtrTag> operation)
+    {
+        move(TrustedImmPtr(operation.executableAddress()), scratchRegister());
+        m_assembler.call(scratchRegister());
     }
 
     ALWAYS_INLINE Call call(RegisterID callTag) { return UNUSED_PARAM(callTag), call(NoPtrTag); }
@@ -421,7 +441,13 @@ public:
 
     void and64(TrustedImmPtr imm, RegisterID srcDest)
     {
-        intptr_t intValue = imm.asIntptr();
+        static_assert(sizeof(void*) == sizeof(int64_t));
+        and64(TrustedImm64(bitwise_cast<int64_t>(imm.m_value)), srcDest);
+    }
+
+    void and64(TrustedImm64 imm, RegisterID srcDest)
+    {
+        int64_t intValue = imm.m_value;
         if (intValue <= std::numeric_limits<int32_t>::max()
             && intValue >= std::numeric_limits<int32_t>::min()) {
             and64(TrustedImm32(static_cast<int32_t>(intValue)), srcDest);
@@ -471,6 +497,44 @@ public:
         }
         m_assembler.bsfq_rr(src, dst);
         ctzAfterBsf<64>(dst);
+    }
+
+    void countTrailingZeros64WithoutNullCheck(RegisterID src, RegisterID dst)
+    {
+#if ASSERT_ENABLED
+        Jump notZero = branchTest64(NonZero, src);
+        abortWithReason(MacroAssemblerOops, __LINE__);
+        notZero.link(this);
+#endif
+        if (supportsBMI1()) {
+            m_assembler.tzcntq_rr(src, dst);
+            return;
+        }
+        m_assembler.bsfq_rr(src, dst);
+    }
+
+    void clearBit64(RegisterID bitToClear, RegisterID dst, RegisterID = InvalidGPRReg)
+    {
+        m_assembler.btrq_rr(dst, bitToClear);
+    }
+
+    enum class ClearBitsAttributes {
+        OKToClobberMask,
+        MustPreserveMask
+    };
+
+    void clearBits64WithMask(RegisterID mask, RegisterID dest, ClearBitsAttributes maskPreservation = ClearBitsAttributes::OKToClobberMask)
+    {
+        not64(mask);
+        m_assembler.andq_rr(mask, dest);
+        if (maskPreservation == ClearBitsAttributes::MustPreserveMask)
+            not64(mask);
+    }
+
+    void clearBits64WithMask(RegisterID src, RegisterID mask, RegisterID dest, ClearBitsAttributes maskPreservation = ClearBitsAttributes::OKToClobberMask)
+    {
+        move(src, dest);
+        clearBits64WithMask(mask, dest, maskPreservation);
     }
 
     void countPopulation64(RegisterID src, RegisterID dst)
@@ -909,6 +973,22 @@ public:
     void store64(TrustedImm32 imm, BaseIndex address)
     {
         m_assembler.movq_i32m(imm.m_value, address.offset, address.base, address.index, address.scale);
+    }
+
+    void store64(TrustedImm64 imm, void* address)
+    {
+        if (CAN_SIGN_EXTEND_32_64(imm.m_value)) {
+            auto addressReg = scratchRegister();
+            move(TrustedImmPtr(address), addressReg);
+            store64(TrustedImm32(static_cast<int32_t>(imm.m_value)), addressReg);
+            return;
+        }
+
+        auto src = scratchRegister();
+        move(imm, src);
+        swap(src, X86Registers::eax);
+        m_assembler.movq_EAXm(address);
+        swap(src, X86Registers::eax);
     }
 
     void store64(TrustedImm64 imm, ImplicitAddress address)
@@ -1770,7 +1850,7 @@ public:
         // instructions are the same. Otherwise, we need to: subtract int64_t::min(); truncate double to
         // uint64_t; then add back int64_t::min() in the destination gpr.
 
-        Jump large = branchDouble(DoubleGreaterThanOrEqual, src, int64Min);
+        Jump large = branchDouble(DoubleGreaterThanOrEqualAndOrdered, src, int64Min);
         m_assembler.cvttsd2siq_rr(src, dest);
         Jump done = jump();
         large.link(this);
@@ -1803,7 +1883,7 @@ public:
         // instructions are the same. Otherwise, we need to: subtract int64_t::min(); truncate double to
         // uint64_t; then add back int64_t::min() in the destination gpr.
 
-        Jump large = branchFloat(DoubleGreaterThanOrEqual, src, int64Min);
+        Jump large = branchFloat(DoubleGreaterThanOrEqualAndOrdered, src, int64Min);
         m_assembler.cvttss2siq_rr(src, dest);
         Jump done = jump();
         large.link(this);

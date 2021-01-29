@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013-2019 Apple Inc. All rights reserved.
+ * Copyright (C) 2013-2020 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -29,18 +29,23 @@
 
 #include "ArrayConstructor.h"
 #include "ArrayPrototype.h"
+#include "CacheableIdentifierInlines.h"
 #include "DFGAbstractInterpreter.h"
 #include "DFGAbstractInterpreterClobberState.h"
 #include "DOMJITGetterSetter.h"
 #include "DOMJITSignature.h"
-#include "GetByIdStatus.h"
+#include "GetByStatus.h"
 #include "GetterSetter.h"
 #include "HashMapImpl.h"
 #include "JITOperations.h"
+#include "JSAsyncGenerator.h"
+#include "JSGenerator.h"
 #include "JSImmutableButterfly.h"
+#include "JSInternalPromise.h"
+#include "JSInternalPromiseConstructor.h"
+#include "JSPromiseConstructor.h"
 #include "MathCommon.h"
 #include "NumberConstructor.h"
-#include "Operations.h"
 #include "PutByIdStatus.h"
 #include "StringObject.h"
 #include "StructureCache.h"
@@ -67,15 +72,13 @@ AbstractInterpreter<AbstractStateType>::~AbstractInterpreter()
 }
 
 template<typename AbstractStateType>
-typename AbstractInterpreter<AbstractStateType>::BooleanResult
-AbstractInterpreter<AbstractStateType>::booleanResult(
-    Node* node, AbstractValue& value)
+TriState AbstractInterpreter<AbstractStateType>::booleanResult(Node* node, AbstractValue& value)
 {
     JSValue childConst = value.value();
     if (childConst) {
-        if (childConst.toBoolean(m_codeBlock->globalObjectFor(node->origin.semantic)->globalExec()))
-            return DefinitelyTrue;
-        return DefinitelyFalse;
+        if (childConst.toBoolean(m_codeBlock->globalObjectFor(node->origin.semantic)))
+            return TriState::True;
+        return TriState::False;
     }
 
     // Next check if we can fold because we know that the source is an object or string and does not equal undefined.
@@ -83,17 +86,16 @@ AbstractInterpreter<AbstractStateType>::booleanResult(
         bool allTrue = true;
         for (unsigned i = value.m_structure.size(); i--;) {
             RegisteredStructure structure = value.m_structure[i];
-            if (structure->masqueradesAsUndefined(m_codeBlock->globalObjectFor(node->origin.semantic))
-                || structure->typeInfo().type() == StringType) {
+            if (structure->masqueradesAsUndefined(m_codeBlock->globalObjectFor(node->origin.semantic)) || structure->typeInfo().type() == StringType || structure->typeInfo().type() == HeapBigIntType) {
                 allTrue = false;
                 break;
             }
         }
         if (allTrue)
-            return DefinitelyTrue;
+            return TriState::True;
     }
 
-    return UnknownBooleanResult;
+    return TriState::Indeterminate;
 }
 
 template<typename AbstractStateType>
@@ -180,10 +182,10 @@ enum class ToThisResult {
     GlobalThis,
     Dynamic,
 };
-inline ToThisResult isToThisAnIdentity(VM& vm, bool isStrictMode, AbstractValue& valueForNode)
+inline ToThisResult isToThisAnIdentity(VM& vm, ECMAMode ecmaMode, AbstractValue& valueForNode)
 {
     // We look at the type first since that will cover most cases and does not require iterating all the structures.
-    if (isStrictMode) {
+    if (ecmaMode.isStrict()) {
         if (valueForNode.m_type && !(valueForNode.m_type & SpecObjectOther))
             return ToThisResult::Identity;
     } else {
@@ -197,20 +199,20 @@ inline ToThisResult isToThisAnIdentity(VM& vm, bool isStrictMode, AbstractValue&
             if (toThisMethod == &JSObject::toThis)
                 return ToThisResult::Identity;
             if (toThisMethod == &JSScope::toThis) {
-                if (isStrictMode)
+                if (ecmaMode.isStrict())
                     return ToThisResult::Undefined;
                 return ToThisResult::GlobalThis;
             }
         }
     }
 
-    if ((isStrictMode || (valueForNode.m_type && !(valueForNode.m_type & ~SpecObject))) && valueForNode.m_structure.isFinite()) {
+    if ((ecmaMode.isStrict() || (valueForNode.m_type && !(valueForNode.m_type & ~SpecObject))) && valueForNode.m_structure.isFinite()) {
         bool allStructuresAreJSScope = !valueForNode.m_structure.isClear();
         bool overridesToThis = false;
         valueForNode.m_structure.forEach([&](RegisteredStructure structure) {
             TypeInfo type = structure->typeInfo();
-            ASSERT(type.isObject() || type.type() == StringType || type.type() == SymbolType || type.type() == BigIntType);
-            if (!isStrictMode)
+            ASSERT(type.isObject() || type.type() == StringType || type.type() == SymbolType || type.type() == HeapBigIntType);
+            if (!ecmaMode.isStrict())
                 ASSERT(type.isObject());
             // We don't need to worry about strings/symbols here since either:
             // 1) We are in strict mode and strings/symbols are not wrapped
@@ -224,7 +226,7 @@ inline ToThisResult isToThisAnIdentity(VM& vm, bool isStrictMode, AbstractValue&
         if (!overridesToThis)
             return ToThisResult::Identity;
         if (allStructuresAreJSScope) {
-            if (isStrictMode)
+            if (ecmaMode.isStrict())
                 return ToThisResult::Undefined;
             return ToThisResult::GlobalThis;
         }
@@ -257,7 +259,8 @@ bool AbstractInterpreter<AbstractStateType>::handleConstantBinaryBitwiseOp(Node*
         case ArithBitXor:
             setConstant(node, JSValue(a ^ b));
             break;
-        case BitRShift:
+        case ArithBitRShift:
+        case ValueBitRShift:
             setConstant(node, JSValue(a >> (static_cast<uint32_t>(b) & 0x1f)));
             break;
         case ValueBitLShift:
@@ -317,10 +320,17 @@ bool AbstractInterpreter<AbstractStateType>::handleConstantDivOp(Node* node)
             if (isClobbering)
                 didFoldClobberWorld();
 
-            if (isDivOperation)
-                setConstant(node, jsDoubleNumber(left.asNumber() / right.asNumber()));
-            else
-                setConstant(node, jsDoubleNumber(fmod(left.asNumber(), right.asNumber())));
+            if (isDivOperation) {
+                if (op == ValueDiv)
+                    setConstant(node, jsNumber(left.asNumber() / right.asNumber()));
+                else
+                    setConstant(node, jsDoubleNumber(left.asNumber() / right.asNumber()));
+            } else {
+                if (op == ValueMod)
+                    setConstant(node, jsNumber(fmod(left.asNumber(), right.asNumber())));
+                else
+                    setConstant(node, jsDoubleNumber(fmod(left.asNumber(), right.asNumber())));
+            }
 
             return true;
         }
@@ -363,7 +373,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case Identity: {
         setForNode(node, forNode(node->child1()));
         if (forNode(node).value())
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
         break;
     }
 
@@ -375,33 +385,33 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
     case GetLocal: {
         VariableAccessData* variableAccessData = node->variableAccessData();
-        AbstractValue value = m_state.operand(variableAccessData->local().offset());
+        AbstractValue value = m_state.operand(variableAccessData->operand());
         // The value in the local should already be checked.
         DFG_ASSERT(m_graph, node, value.isType(typeFilterFor(variableAccessData->flushFormat())));
         if (value.value())
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
         setForNode(node, value);
         break;
     }
 
     case GetStack: {
         StackAccessData* data = node->stackAccessData();
-        AbstractValue value = m_state.operand(data->local);
+        AbstractValue value = m_state.operand(data->operand);
         // The value in the local should already be checked.
         DFG_ASSERT(m_graph, node, value.isType(typeFilterFor(data->format)));
         if (value.value())
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
         setForNode(node, value);
         break;
     }
 
     case SetLocal: {
-        m_state.operand(node->local()) = forNode(node->child1());
+        m_state.operand(node->operand()) = forNode(node->child1());
         break;
     }
 
     case PutStack: {
-        m_state.operand(node->stackAccessData()->local) = forNode(node->child1());
+        m_state.operand(node->stackAccessData()->operand) = forNode(node->child1());
         break;
     }
 
@@ -423,7 +433,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         // Assert that the state of arguments has been set. SetArgumentDefinitely/SetArgumentMaybe means
         // that someone set the argument values out-of-band, and currently this always means setting to a
         // non-clear value.
-        ASSERT(!m_state.operand(node->local()).isClear());
+        ASSERT(!m_state.operand(node->operand()).isClear());
         break;
 
     case InitializeEntrypointArguments: {
@@ -452,6 +462,12 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         break;
     }
 
+    case VarargsLength: {
+        clobberWorld();
+        setTypeForNode(node, SpecInt32Only);
+        break;
+    }
+
     case LoadVarargs:
     case ForwardVarargs: {
         // FIXME: ForwardVarargs should check if the count becomes known, and if it does, it should turn
@@ -470,7 +486,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         LoadVarargsData* data = node->loadVarargsData();
         m_state.operand(data->count).setNonCellType(SpecInt32Only);
         for (unsigned i = data->limit - 1; i--;)
-            m_state.operand(data->start.offset() + i).makeHeapTop();
+            m_state.operand(data->start + i).makeHeapTop();
         break;
     }
 
@@ -483,7 +499,18 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             break;
         }
 
-        if (node->child1().useKind() == BigIntUse)
+        if (node->child1().useKind() == BigInt32Use) {
+#if USE(BIGINT32)
+            setTypeForNode(node, SpecBigInt32);
+#else
+            RELEASE_ASSERT_NOT_REACHED();
+#endif
+        } else if (node->child1().useKind() == HeapBigIntUse) {
+            // FIXME: We will want an arithmetic mode here that allows us to speculate or dictate
+            // the format of our result:
+            // https://bugs.webkit.org/show_bug.cgi?id=210982
+            setTypeForNode(node, SpecBigInt);
+        } else if (node->child1().useKind() == AnyBigIntUse)
             setTypeForNode(node, SpecBigInt);
         else {
             clobberWorld();
@@ -508,11 +535,40 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case ValueBitXor:
     case ValueBitAnd:
     case ValueBitOr:
+    case ValueBitRShift:
     case ValueBitLShift: {
         if (handleConstantBinaryBitwiseOp(node))
             break;
 
-        if (node->binaryUseKind() == BigIntUse)
+        // FIXME: this use of binaryUseKind means that we cannot specialize to (for example) a HeapBigInt left-operand and a BigInt32 right-operand.
+        // https://bugs.webkit.org/show_bug.cgi?id=210977
+        if (node->binaryUseKind() == BigInt32Use) {
+#if USE(BIGINT32)
+            switch (node->op()) {
+            case ValueBitXor:
+            case ValueBitAnd:
+            case ValueBitOr:
+                setTypeForNode(node, SpecBigInt32);
+                break;
+
+            // FIXME: We should have inlined implementation that always returns BigInt32.
+            // https://bugs.webkit.org/show_bug.cgi?id=210847
+            case ValueBitRShift:
+            case ValueBitLShift:
+                setTypeForNode(node, SpecBigInt);
+                break;
+            default:
+                DFG_CRASH(m_graph, node, "Incorrect DFG op");
+            }
+#else
+            DFG_CRASH(m_graph, node, "No BigInt32 support");
+#endif
+        } else if (node->isBinaryUseKind(HeapBigIntUse)) {
+            // FIXME: We will want an arithmetic mode here that allows us to speculate or dictate
+            // the format of our result:
+            // https://bugs.webkit.org/show_bug.cgi?id=210982
+            setTypeForNode(node, SpecBigInt);
+        } else if (node->binaryUseKind() == AnyBigIntUse)
             setTypeForNode(node, SpecBigInt);
         else {
             clobberWorld();
@@ -524,7 +580,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case ArithBitAnd:
     case ArithBitOr:
     case ArithBitXor:
-    case BitRShift:
+    case ArithBitRShift:
     case ArithBitLShift:
     case BitURShift: {
         if (node->child1().useKind() == UntypedUse || node->child2().useKind() == UntypedUse) {
@@ -590,7 +646,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         AbstractValue& value = forNode(node);
         value = forNode(node->child1());
         if (node->child1().useKind() == UntypedUse && !(value.m_type & ~SpecBoolean))
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
         if (value.m_type & SpecBoolean) {
             value.merge(SpecBoolInt32);
             value.filter(~SpecBoolean);
@@ -650,7 +706,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
         SpeculatedType type = forNode(node->child1()).m_type;
         switch (node->child1().useKind()) {
-        case NotCellUse: {
+        case NotCellNorBigIntUse: {
             if (type & SpecOther) {
                 type &= ~SpecOther;
                 type |= SpecDoublePureNaN | SpecBoolInt32; // Null becomes zero, undefined becomes NaN.
@@ -702,11 +758,19 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
     case ValueSub:
     case ValueAdd: {
-        DFG_ASSERT(m_graph, node, node->binaryUseKind() == UntypedUse || node->binaryUseKind() == BigIntUse);
-        if (node->binaryUseKind() == BigIntUse)
+        if (node->isBinaryUseKind(HeapBigIntUse)) {
+            // FIXME: We will want an arithmetic mode here that allows us to speculate or dictate
+            // the format of our result:
+            // https://bugs.webkit.org/show_bug.cgi?id=210982
             setTypeForNode(node, SpecBigInt);
+        } else if (node->isBinaryUseKind(AnyBigIntUse))
+            setTypeForNode(node, SpecBigInt);
+        else if (node->isBinaryUseKind(BigInt32Use))
+            setTypeForNode(node, SpecBigInt32);
         else {
+            DFG_ASSERT(m_graph, node, node->binaryUseKind() == UntypedUse);
             clobberWorld();
+            // FIXME: do we really need SpecString here for ValueSub? It seems like we only need it for ValueAdd.
             setTypeForNode(node, SpecString | SpecBytecodeNumber | SpecBigInt);
         }
         break;
@@ -812,7 +876,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         }
 
         if (numberOfRemovedChildren)
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
         setForNode(node, m_vm.stringStructure.get());
         break;
     }
@@ -866,6 +930,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     }
 
     case ValueNegate: {
+        // FIXME: we could do much smarter things for BigInts, see ValueAdd/ValueSub.
         clobberWorld();
         setTypeForNode(node, SpecBytecodeNumber | SpecBigInt);
         break;
@@ -924,19 +989,57 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         break;
     }
 
+    case Inc:
+    case Dec: {
+        // FIXME: support some form of constant folding here.
+        // https://bugs.webkit.org/show_bug.cgi?id=204258
+        switch (node->child1().useKind()) {
+        case Int32Use:
+            setNonCellTypeForNode(node, SpecInt32Only);
+            break;
+        case Int52RepUse:
+            setNonCellTypeForNode(node, SpecInt52Any);
+            break;
+        case DoubleRepUse:
+            setNonCellTypeForNode(node, typeOfDoubleIncOrDec(forNode(node->child1()).m_type));
+            break;
+        case HeapBigIntUse:
+            // FIXME: We will want an arithmetic mode here that allows us to speculate or dictate
+            // the format of our result:
+            // https://bugs.webkit.org/show_bug.cgi?id=210982
+            setTypeForNode(node, SpecBigInt);
+            break;
+        case AnyBigIntUse:
+        case BigInt32Use:
+            setTypeForNode(node, SpecBigInt);
+            break;
+        default:
+            setTypeForNode(node, SpecBytecodeNumber | SpecBigInt);
+            clobberWorld(); // Because of the call to ToNumeric()
+            break;
+        }
+        break;
+    }
+
     case ValuePow: {
         JSValue childX = forNode(node->child1()).value();
         JSValue childY = forNode(node->child2()).value();
         if (childX && childY && childX.isNumber() && childY.isNumber()) {
             // We need to call `didFoldClobberWorld` here because this path is only possible
-            // when node->useKind is UntypedUse. In the case of BigIntUse, children will be
+            // when node->useKind is UntypedUse. In the case of AnyBigIntUse or friends, children will be
             // cleared by `AbstractInterpreter::executeEffects`.
             didFoldClobberWorld();
-            setConstant(node, jsDoubleNumber(operationMathPow(childX.asNumber(), childY.asNumber())));
+            // Our boxing scheme here matches what we do in operationValuePow.
+            setConstant(node, jsNumber(operationMathPow(childX.asNumber(), childY.asNumber())));
             break;
         }
 
-        if (node->binaryUseKind() == BigIntUse)
+        if (node->isBinaryUseKind(HeapBigIntUse)) {
+            // FIXME: We will want an arithmetic mode here that allows us to speculate or dictate
+            // the format of our result:
+            // https://bugs.webkit.org/show_bug.cgi?id=210982
+            setTypeForNode(node, SpecBigInt);
+        } else if (node->binaryUseKind() == AnyBigIntUse || node->binaryUseKind() == BigInt32Use)
             setTypeForNode(node, SpecBigInt);
         else {
             clobberWorld();
@@ -946,8 +1049,16 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     }
 
     case ValueMul: {
-        if (node->binaryUseKind() == BigIntUse)
+        // FIXME: why is this code not shared with ValueSub?
+        if (node->isBinaryUseKind(HeapBigIntUse)) {
+            // FIXME: We will want an arithmetic mode here that allows us to speculate or dictate
+            // the format of our result:
+            // https://bugs.webkit.org/show_bug.cgi?id=210982
             setTypeForNode(node, SpecBigInt);
+        } else if (node->isBinaryUseKind(AnyBigIntUse))
+            setTypeForNode(node, SpecBigInt);
+        else if (node->isBinaryUseKind(BigInt32Use))
+            setTypeForNode(node, SpecBigInt32);
         else {
             clobberWorld();
             setTypeForNode(node, SpecBytecodeNumber | SpecBigInt);
@@ -1010,7 +1121,12 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         if (handleConstantDivOp(node))
             break;
 
-        if (node->binaryUseKind() == BigIntUse)
+        if (node->isBinaryUseKind(HeapBigIntUse)) {
+            // FIXME: We will want an arithmetic mode here that allows us to speculate or dictate
+            // the format of our result:
+            // https://bugs.webkit.org/show_bug.cgi?id=210982
+            setTypeForNode(node, SpecBigInt);
+        } else if (node->binaryUseKind() == AnyBigIntUse || node->binaryUseKind() == BigInt32Use)
             setTypeForNode(node, SpecBigInt);
         else {
             clobberWorld();
@@ -1062,7 +1178,9 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             if (left && right && left.isNumber() && right.isNumber()) {
                 double a = left.asNumber();
                 double b = right.asNumber();
-                setConstant(node, jsDoubleNumber(a < b ? a : (b <= a ? b : a + b)));
+                // The spec for Math.min states that +0 is considered to be larger than -0.
+                double result = a < b || (!a && !b && std::signbit(a)) ? a : (b <= a ? b : a + b);
+                setConstant(node, jsDoubleNumber(result));
                 break;
             }
             setNonCellTypeForNode(node,
@@ -1091,7 +1209,9 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             if (left && right && left.isNumber() && right.isNumber()) {
                 double a = left.asNumber();
                 double b = right.asNumber();
-                setConstant(node, jsDoubleNumber(a > b ? a : (b >= a ? b : a + b)));
+                // The spec for Math.max states that +0 is considered to be larger than -0.
+                double result = a > b || (!a && !b && !std::signbit(a)) ? a : (b >= a ? b : a + b);
+                setConstant(node, jsDoubleNumber(result));
                 break;
             }
             setNonCellTypeForNode(node,
@@ -1227,13 +1347,13 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
     case LogicalNot: {
         switch (booleanResult(node, forNode(node->child1()))) {
-        case DefinitelyTrue:
+        case TriState::True:
             setConstant(node, jsBoolean(false));
             break;
-        case DefinitelyFalse:
+        case TriState::False:
             setConstant(node, jsBoolean(true));
             break;
-        default:
+        case TriState::Indeterminate:
             setNonCellTypeForNode(node, SpecBoolean);
             break;
         }
@@ -1263,7 +1383,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
         SpeculatedType typeMaybeNormalized = (SpecFullNumber & ~SpecInt32Only);
         if (!(forNode(node->child1()).m_type & typeMaybeNormalized)) {
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
             forNode(node) = forNode(node->child1());
             break;
         }
@@ -1330,14 +1450,16 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         break;
 
     case IsEmpty:
-    case IsUndefined:
+    case TypeOfIsUndefined:
     case IsUndefinedOrNull:
     case IsBoolean:
     case IsNumber:
+    case IsBigInt:
     case NumberIsInteger:
     case IsObject:
     case IsObjectOrNull:
     case IsFunction:
+    case IsConstructor:
     case IsCellWithType:
     case IsTypedArrayView: {
         AbstractValue child = forNode(node->child1());
@@ -1347,7 +1469,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             case IsCellWithType:
                 setConstant(node, jsBoolean(child.value().isCell() && child.value().asCell()->type() == node->queriedType()));
                 break;
-            case IsUndefined:
+            case TypeOfIsUndefined:
                 setConstant(node, jsBoolean(
                     child.value().isCell()
                     ? child.value().asCell()->structure(m_vm)->masqueradesAsUndefined(m_codeBlock->globalObjectFor(node->origin.semantic))
@@ -1361,6 +1483,9 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
                 break;
             case IsNumber:
                 setConstant(node, jsBoolean(child.value().isNumber()));
+                break;
+            case IsBigInt:
+                setConstant(node, jsBoolean(child.value().isBigInt()));
                 break;
             case NumberIsInteger:
                 setConstant(node, jsBoolean(NumberConstructor::isIntegerImpl(child.value())));
@@ -1398,6 +1523,9 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
                 } else
                     setConstant(node, jsBoolean(false));
                 break;
+            case IsConstructor:
+                setConstant(node, jsBoolean(child.value().isConstructor(m_vm)));
+                break;
             case IsEmpty:
                 setConstant(node, jsBoolean(child.value().isEmpty()));
                 break;
@@ -1410,6 +1538,37 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             }
             if (constantWasSet)
                 break;
+        }
+
+        if (!(child.m_type & ~SpecCell)) {
+            if (child.m_structure.isFinite()) {
+                bool constantWasSet = false;
+                switch (node->op()) {
+                case IsCellWithType: {
+                    bool ok = true;
+                    Optional<bool> result;
+                    child.m_structure.forEach(
+                        [&] (RegisteredStructure structure) {
+                            bool matched = structure->typeInfo().type() == node->queriedType();
+                            if (!result)
+                                result = matched;
+                            else {
+                                if (result.value() != matched)
+                                    ok = false;
+                            }
+                        });
+                    if (ok && result) {
+                        setConstant(node, jsBoolean(result.value()));
+                        constantWasSet = true;
+                    }
+                    break;
+                }
+                default:
+                    break;
+                }
+                if (constantWasSet)
+                    break;
+            }
         }
 
         // FIXME: This code should really use AbstractValue::isType() and
@@ -1433,7 +1592,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
             break;
         }
-        case IsUndefined:
+        case TypeOfIsUndefined:
             // FIXME: Use the masquerades-as-undefined watchpoint thingy.
             // https://bugs.webkit.org/show_bug.cgi?id=144456
 
@@ -1485,7 +1644,22 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             }
 
             break;
+        case IsBigInt:
+            if (!(child.m_type & ~SpecBigInt)) {
+                setConstant(node, jsBoolean(true));
+                constantWasSet = true;
+                break;
+            }
 
+            if (!(child.m_type & SpecBigInt)) {
+                setConstant(node, jsBoolean(false));
+                constantWasSet = true;
+                break;
+            }
+
+            // FIXME: if the SpeculatedType informs us that we won't have a BigInt32 (or that we won't have a HeapBigInt), then we can transform this node into a IsCellWithType(HeapBigIntType) (or a hypothetical IsBigInt32 node).
+
+            break;
         case NumberIsInteger:
             if (!(child.m_type & ~SpecInt32Only)) {
                 setConstant(node, jsBoolean(true));
@@ -1561,18 +1735,32 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             }
             break;
 
-        case IsCellWithType:
-            if (!(child.m_type & ~node->speculatedTypeForQuery())) {
+        case IsConstructor:
+            // FIXME: We can speculate constructability from child's m_structure.
+            // https://bugs.webkit.org/show_bug.cgi?id=211796
+            break;
+
+        case IsCellWithType: {
+            Optional<SpeculatedType> filter = node->speculatedTypeForQuery();
+            if (!filter) {
+                if (!(child.m_type & SpecCell)) {
+                    setConstant(node, jsBoolean(false));
+                    constantWasSet = true;
+                }
+                break;
+            }
+            if (!(child.m_type & ~filter.value())) {
                 setConstant(node, jsBoolean(true));
                 constantWasSet = true;
                 break;
             }
-            if (!(child.m_type & node->speculatedTypeForQuery())) {
+            if (!(child.m_type & filter.value())) {
                 setConstant(node, jsBoolean(false));
                 constantWasSet = true;
                 break;
             }
             break;
+        }
 
         case IsTypedArrayView:
             if (!(child.m_type & ~SpecTypedArrayView)) {
@@ -1702,23 +1890,45 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         JSValue rightConst = forNode(node->child2()).value();
         if (leftConst && rightConst) {
             if (leftConst.isNumber() && rightConst.isNumber()) {
+                auto compareNumber = [&](double a, double b) {
+                    switch (node->op()) {
+                    case CompareLess:
+                        return jsBoolean(a < b);
+                    case CompareLessEq:
+                        return jsBoolean(a <= b);
+                    case CompareGreater:
+                        return jsBoolean(a > b);
+                    case CompareGreaterEq:
+                        return jsBoolean(a >= b);
+                    case CompareEq:
+                        return jsBoolean(a == b);
+                    default:
+                        RELEASE_ASSERT_NOT_REACHED();
+                        break;
+                    }
+                };
                 double a = leftConst.asNumber();
                 double b = rightConst.asNumber();
+                setConstant(node, compareNumber(a, b));
+                break;
+            }
+
+            if (leftConst.isBigInt() && rightConst.isBigInt()) {
                 switch (node->op()) {
                 case CompareLess:
-                    setConstant(node, jsBoolean(a < b));
+                    setConstant(node, jsBoolean(bigIntCompareResult(compareBigInt(leftConst, rightConst), JSBigInt::ComparisonMode::LessThan)));
                     break;
                 case CompareLessEq:
-                    setConstant(node, jsBoolean(a <= b));
+                    setConstant(node, jsBoolean(bigIntCompareResult(compareBigInt(leftConst, rightConst), JSBigInt::ComparisonMode::LessThanOrEqual)));
                     break;
                 case CompareGreater:
-                    setConstant(node, jsBoolean(a > b));
+                    setConstant(node, jsBoolean(bigIntCompareResult(compareBigInt(rightConst, leftConst), JSBigInt::ComparisonMode::LessThan)));
                     break;
                 case CompareGreaterEq:
-                    setConstant(node, jsBoolean(a >= b));
+                    setConstant(node, jsBoolean(bigIntCompareResult(compareBigInt(rightConst, leftConst), JSBigInt::ComparisonMode::LessThanOrEqual)));
                     break;
                 case CompareEq:
-                    setConstant(node, jsBoolean(a == b));
+                    setConstant(node, jsBoolean(compareBigInt(leftConst, rightConst) == JSBigInt::ComparisonResult::Equal));
                     break;
                 default:
                     RELEASE_ASSERT_NOT_REACHED();
@@ -1794,6 +2004,9 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         if (node->child1() == node->child2()) {
             if (node->isBinaryUseKind(Int32Use) ||
                 node->isBinaryUseKind(Int52RepUse) ||
+                node->isBinaryUseKind(BigInt32Use) ||
+                node->isBinaryUseKind(HeapBigIntUse) ||
+                node->isBinaryUseKind(AnyBigIntUse) ||
                 node->isBinaryUseKind(StringUse) ||
                 node->isBinaryUseKind(BooleanUse) ||
                 node->isBinaryUseKind(SymbolUse) ||
@@ -1850,14 +2063,15 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             }
         }
 
+        // FIXME: why is this check here, and not later (after the type-based replacement by false).
+        // Saam seems to agree that the two checks could be switched, I'll try that in a separate patch
         if (node->isBinaryUseKind(UntypedUse)) {
-            // FIXME: Revisit this condition when introducing BigInt to JSC.
-            auto isNonStringCellConstant = [] (JSValue value) {
-                return value && value.isCell() && !value.isString();
+            auto isNonStringAndNonBigIntCellConstant = [] (JSValue value) {
+                return value && value.isCell() && !value.isString() && !value.isHeapBigInt();
             };
 
-            if (isNonStringCellConstant(left) || isNonStringCellConstant(right)) {
-                m_state.setFoundConstants(true);
+            if (isNonStringAndNonBigIntCellConstant(left) || isNonStringAndNonBigIntCellConstant(right)) {
+                m_state.setShouldTryConstantFolding(true);
                 setNonCellTypeForNode(node, SpecBoolean);
                 break;
             }
@@ -1871,19 +2085,24 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         }
 
         if (node->child1() == node->child2()) {
-            if (node->isBinaryUseKind(BooleanUse) ||
-                node->isBinaryUseKind(Int32Use) ||
-                node->isBinaryUseKind(Int52RepUse) ||
-                node->isBinaryUseKind(StringUse) ||
-                node->isBinaryUseKind(StringIdentUse) ||
-                node->isBinaryUseKind(SymbolUse) ||
-                node->isBinaryUseKind(ObjectUse) ||
-                node->isBinaryUseKind(MiscUse, UntypedUse) ||
-                node->isBinaryUseKind(UntypedUse, MiscUse) ||
-                node->isBinaryUseKind(StringIdentUse, NotStringVarUse) ||
-                node->isBinaryUseKind(NotStringVarUse, StringIdentUse) ||
-                node->isBinaryUseKind(StringUse, UntypedUse) ||
-                node->isBinaryUseKind(UntypedUse, StringUse)) {
+            // FIXME: Is there any case not involving NaN where x === x is not guaranteed to return true?
+            // If not I might slightly simplify that check.
+            if (node->isBinaryUseKind(BooleanUse)
+                || node->isBinaryUseKind(Int32Use)
+                || node->isBinaryUseKind(Int52RepUse)
+                || node->isBinaryUseKind(StringUse)
+                || node->isBinaryUseKind(StringIdentUse)
+                || node->isBinaryUseKind(SymbolUse)
+                || node->isBinaryUseKind(ObjectUse)
+                || node->isBinaryUseKind(MiscUse, UntypedUse)
+                || node->isBinaryUseKind(UntypedUse, MiscUse)
+                || node->isBinaryUseKind(StringIdentUse, NotStringVarUse)
+                || node->isBinaryUseKind(NotStringVarUse, StringIdentUse)
+                || node->isBinaryUseKind(StringUse, UntypedUse)
+                || node->isBinaryUseKind(UntypedUse, StringUse)
+                || node->isBinaryUseKind(BigInt32Use)
+                || node->isBinaryUseKind(HeapBigIntUse)
+                || node->isBinaryUseKind(AnyBigIntUse)) {
                 setConstant(node, jsBoolean(true));
                 break;
             }
@@ -1906,6 +2125,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     }
 
     case StringCharCodeAt:
+    case StringCodePointAt:
         setNonCellTypeForNode(node, SpecInt32Only);
         break;
 
@@ -2284,16 +2504,16 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             unsigned argumentIndex;
             if (argumentIndexChecked.safeGet(argumentIndex) != CheckedState::DidOverflow) {
                 if (inlineCallFrame) {
-                    if (argumentIndex < inlineCallFrame->argumentCountIncludingThis - 1) {
+                    if (argumentIndex < static_cast<unsigned>(inlineCallFrame->argumentCountIncludingThis - 1)) {
                         setForNode(node, m_state.operand(
-                            virtualRegisterForArgument(argumentIndex + 1) + inlineCallFrame->stackOffset));
-                        m_state.setFoundConstants(true);
+                            virtualRegisterForArgumentIncludingThis(argumentIndex + 1) + inlineCallFrame->stackOffset));
+                        m_state.setShouldTryConstantFolding(true);
                         break;
                     }
                 } else {
                     if (argumentIndex < m_state.numberOfArguments() - 1) {
                         setForNode(node, m_state.argument(argumentIndex + 1));
-                        m_state.setFoundConstants(true);
+                        m_state.setShouldTryConstantFolding(true);
                         break;
                     }
                 }
@@ -2307,14 +2527,14 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             for (unsigned i = 1 + node->numberOfArgumentsToSkip(); i < inlineCallFrame->argumentCountIncludingThis; ++i) {
                 result.merge(
                     m_state.operand(
-                        virtualRegisterForArgument(i) + inlineCallFrame->stackOffset));
+                        virtualRegisterForArgumentIncludingThis(i) + inlineCallFrame->stackOffset));
             }
 
             if (node->op() == GetMyArgumentByValOutOfBounds)
                 result.merge(SpecOther);
 
             if (result.value())
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
 
             setForNode(node, result);
             break;
@@ -2338,7 +2558,6 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
                     m_graph.watchpoints().addLazily(globalObject->havingABadTimeWatchpoint());
                     RegisteredStructureSet structureSet;
                     structureSet.add(m_graph.registerStructure(globalObject->regExpMatchesArrayStructure()));
-                    structureSet.add(m_graph.registerStructure(globalObject->regExpMatchesArrayWithGroupsStructure()));
                     setForNode(node, structureSet);
                     forNode(node).merge(SpecOther);
                     break;
@@ -2382,20 +2601,21 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
     case Branch: {
         Node* child = node->child1().node();
-        BooleanResult result = booleanResult(node, forNode(child));
-        if (result == DefinitelyTrue) {
+        switch (booleanResult(node, forNode(child))) {
+        case TriState::True:
             m_state.setBranchDirection(TakeTrue);
             break;
-        }
-        if (result == DefinitelyFalse) {
+        case TriState::False:
             m_state.setBranchDirection(TakeFalse);
             break;
+        case TriState::Indeterminate:
+            // FIXME: The above handles the trivial cases of sparse conditional
+            // constant propagation, but we can do better:
+            // We can specialize the source variable's value on each direction of
+            // the branch.
+            m_state.setBranchDirection(TakeBoth);
+            break;
         }
-        // FIXME: The above handles the trivial cases of sparse conditional
-        // constant propagation, but we can do better:
-        // We can specialize the source variable's value on each direction of
-        // the branch.
-        m_state.setBranchDirection(TakeBoth);
         break;
     }
 
@@ -2433,7 +2653,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         ASSERT(node->child1().useKind() == UntypedUse);
 
         if (!(forNode(node->child1()).m_type & ~(SpecFullNumber | SpecBoolean | SpecString | SpecSymbol | SpecBigInt))) {
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
             didFoldClobberWorld();
             setForNode(node, forNode(node->child1()));
             break;
@@ -2442,6 +2662,20 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         clobberWorld();
 
         setTypeForNode(node, SpecHeapTop & ~SpecObject);
+        break;
+    }
+
+    case ToPropertyKey: {
+        if (!(forNode(node->child1()).m_type & ~(SpecString | SpecSymbol))) {
+            m_state.setShouldTryConstantFolding(true);
+            didFoldClobberWorld();
+            setForNode(node, forNode(node->child1()));
+            break;
+        }
+
+        clobberWorld();
+
+        setTypeForNode(node, SpecString | SpecSymbol);
         break;
     }
 
@@ -2456,9 +2690,73 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         ASSERT(node->child1().useKind() == UntypedUse);
 
         if (!(forNode(node->child1()).m_type & ~SpecBytecodeNumber)) {
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
             didFoldClobberWorld();
             setForNode(node, forNode(node->child1()));
+            break;
+        }
+
+        clobberWorld();
+        setNonCellTypeForNode(node, SpecBytecodeNumber);
+        break;
+    }
+
+    case ToNumeric: {
+        JSValue childConst = forNode(node->child1()).value();
+        if (childConst && (childConst.isNumber() || childConst.isBigInt())) {
+            didFoldClobberWorld();
+            if (childConst.isCell())
+                setConstant(node, *m_graph.freeze(childConst.asCell()));
+            else
+                setConstant(node, childConst);
+            break;
+        }
+
+        ASSERT(node->child1().useKind() == UntypedUse);
+
+        if (!(forNode(node->child1()).m_type & ~(SpecBytecodeNumber | SpecBigInt))) {
+            m_state.setShouldTryConstantFolding(true);
+            didFoldClobberWorld();
+            setForNode(node, forNode(node->child1()));
+            break;
+        }
+
+        clobberWorld();
+        setTypeForNode(node, SpecBytecodeNumber | SpecBigInt);
+        break;
+    }
+
+    case CallNumberConstructor: {
+        JSValue childConst = forNode(node->child1()).value();
+        if (childConst) {
+            if (childConst.isNumber()) {
+                if (node->child1().useKind() == UntypedUse)
+                    didFoldClobberWorld();
+                setConstant(node, childConst);
+                break;
+            }
+#if USE(BIGINT32)
+            if (childConst.isBigInt32()) {
+                if (node->child1().useKind() == UntypedUse)
+                    didFoldClobberWorld();
+                setConstant(node, jsNumber(childConst.bigInt32AsInt32()));
+                break;
+            }
+#endif
+        }
+
+        ASSERT(node->child1().useKind() == UntypedUse || node->child1().useKind() == BigInt32Use);
+
+        if (!(forNode(node->child1()).m_type & ~SpecBytecodeNumber)) {
+            m_state.setShouldTryConstantFolding(true);
+            if (node->child1().useKind() == UntypedUse)
+                didFoldClobberWorld();
+            setForNode(node, forNode(node->child1()));
+            break;
+        }
+
+        if (node->child1().useKind() == BigInt32Use) {
+            setTypeForNode(node, SpecInt32Only);
             break;
         }
 
@@ -2494,7 +2792,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         if (radixValue && radixValue.isInt32()) {
             int32_t radix = radixValue.asInt32();
             if (2 <= radix && radix <= 36) {
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
                 didFoldClobberWorld();
                 setForNode(node, m_graph.m_vm.stringStructure.get());
                 break;
@@ -2532,8 +2830,26 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             // We've compiled assuming we're not having a bad time, so to be consistent
             // with StructureRegisterationPhase we must say we produce an original array
             // allocation structure.
-            setForNode(node,
-                m_graph.globalObjectFor(node->origin.semantic)->originalArrayStructureForIndexingType(ArrayWithContiguous));
+#if USE(JSVALUE64)
+            BitVector* bitVector = node->bitVector();
+            if (node->numChildren() == 1 && bitVector->get(0)) {
+                Edge use = m_graph.varArgChild(node, 0);
+                if (use->op() == PhantomSpread) {
+                    if (use->child1()->op() == PhantomNewArrayBuffer) {
+                        auto* immutableButterfly = use->child1()->castOperand<JSImmutableButterfly*>();
+                        if (hasContiguous(immutableButterfly->indexingType())) {
+                            m_state.setShouldTryConstantFolding(true);
+                            setForNode(node, m_graph.globalObjectFor(node->origin.semantic)->originalArrayStructureForIndexingType(CopyOnWriteArrayWithContiguous));
+                            break;
+                        }
+                    }
+                } else {
+                    setForNode(node, m_graph.globalObjectFor(node->origin.semantic)->originalArrayStructureForIndexingType(CopyOnWriteArrayWithContiguous));
+                    break;
+                }
+            }
+#endif
+            setForNode(node, m_graph.globalObjectFor(node->origin.semantic)->originalArrayStructureForIndexingType(ArrayWithContiguous));
         } else {
             setForNode(node,
                 m_graph.globalObjectFor(node->origin.semantic)->arrayStructureForIndexingTypeDuringAllocation(ArrayWithContiguous));
@@ -2554,8 +2870,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             break;
         }
 
-        setForNode(node,
-            m_vm.fixedArrayStructure.get());
+        setForNode(node, m_vm.immutableButterflyStructures[arrayIndexFromIndexingType(CopyOnWriteArrayWithContiguous) - NumberOfIndexingShapes].get());
         break;
 
     case NewArrayBuffer:
@@ -2590,23 +2905,23 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case ToThis: {
         AbstractValue& source = forNode(node->child1());
         AbstractValue& destination = forNode(node);
-        bool strictMode = m_graph.isStrictModeFor(node->origin.semantic);
+        ECMAMode ecmaMode = node->ecmaMode();
 
-        ToThisResult result = isToThisAnIdentity(m_vm, strictMode, source);
+        ToThisResult result = isToThisAnIdentity(m_vm, ecmaMode, source);
         switch (result) {
         case ToThisResult::Identity:
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
             destination = source;
             break;
         case ToThisResult::Undefined:
             setConstant(node, jsUndefined());
             break;
         case ToThisResult::GlobalThis:
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
             destination.setType(m_graph, SpecObject);
             break;
         case ToThisResult::Dynamic:
-            if (strictMode)
+            if (ecmaMode.isStrict())
                 destination.makeHeapTop();
             else {
                 destination = source;
@@ -2621,13 +2936,15 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         if (JSValue base = forNode(node->child1()).m_value) {
             if (auto* function = jsDynamicCast<JSFunction*>(m_vm, base)) {
                 if (FunctionRareData* rareData = function->rareData()) {
-                    if (Structure* structure = rareData->objectAllocationStructure()) {
-                        m_graph.freeze(rareData);
-                        m_graph.watchpoints().addLazily(rareData->allocationProfileWatchpointSet());
-                        m_state.setFoundConstants(true);
-                        didFoldClobberWorld();
-                        setForNode(node, structure);
-                        break;
+                    if (rareData->allocationProfileWatchpointSet().isStillValid()) {
+                        if (Structure* structure = rareData->objectAllocationStructure()) {
+                            m_graph.freeze(rareData);
+                            m_graph.watchpoints().addLazily(rareData->allocationProfileWatchpointSet());
+                            m_state.setShouldTryConstantFolding(true);
+                            didFoldClobberWorld();
+                            setForNode(node, structure);
+                            break;
+                        }
                     }
                 }
             }
@@ -2637,7 +2954,90 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         break;
     }
 
+    case CreatePromise: {
+        JSGlobalObject* globalObject = m_graph.globalObjectFor(node->origin.semantic);
+        if (JSValue base = forNode(node->child1()).m_value) {
+            if (base == (node->isInternalPromise() ? globalObject->internalPromiseConstructor() : globalObject->promiseConstructor())) {
+                m_state.setShouldTryConstantFolding(true);
+                didFoldClobberWorld();
+                setForNode(node, node->isInternalPromise() ? globalObject->internalPromiseStructure() : globalObject->promiseStructure());
+                break;
+            }
+            if (auto* function = jsDynamicCast<JSFunction*>(m_graph.m_vm, base)) {
+                if (FunctionRareData* rareData = function->rareData()) {
+                    if (rareData->allocationProfileWatchpointSet().isStillValid()) {
+                        Structure* structure = rareData->internalFunctionAllocationStructure();
+                        if (structure
+                            && structure->classInfo() == (node->isInternalPromise() ? JSInternalPromise::info() : JSPromise::info())
+                            && structure->globalObject() == globalObject
+                            && rareData->allocationProfileWatchpointSet().isStillValid()) {
+                            m_graph.freeze(rareData);
+                            m_graph.watchpoints().addLazily(rareData->allocationProfileWatchpointSet());
+                            m_state.setShouldTryConstantFolding(true);
+                            didFoldClobberWorld();
+                            setForNode(node, structure);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        clobberWorld();
+        setTypeForNode(node, SpecPromiseObject);
+        break;
+    }
+
+    case CreateGenerator:
+    case CreateAsyncGenerator: {
+        auto tryToFold = [&] (const ClassInfo* classInfo) -> bool {
+            JSGlobalObject* globalObject = m_graph.globalObjectFor(node->origin.semantic);
+            if (JSValue base = forNode(node->child1()).m_value) {
+                if (auto* function = jsDynamicCast<JSFunction*>(m_graph.m_vm, base)) {
+                    if (FunctionRareData* rareData = function->rareData()) {
+                        if (rareData->allocationProfileWatchpointSet().isStillValid()) {
+                            Structure* structure = rareData->internalFunctionAllocationStructure();
+                            if (structure
+                                && structure->classInfo() == classInfo
+                                && structure->globalObject() == globalObject
+                                && rareData->allocationProfileWatchpointSet().isStillValid()) {
+                                m_graph.freeze(rareData);
+                                m_graph.watchpoints().addLazily(rareData->allocationProfileWatchpointSet());
+                                m_state.setShouldTryConstantFolding(true);
+                                didFoldClobberWorld();
+                                setForNode(node, structure);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        };
+
+        bool found = false;
+        switch (node->op()) {
+        case CreateGenerator:
+            found = tryToFold(JSGenerator::info());
+            break;
+        case CreateAsyncGenerator:
+            found = tryToFold(JSAsyncGenerator::info());
+            break;
+        default:
+            RELEASE_ASSERT_NOT_REACHED();
+            break;
+        }
+        if (found)
+            break;
+        clobberWorld();
+        setTypeForNode(node, SpecObjectOther);
+        break;
+    }
+
+    case NewGenerator:
+    case NewAsyncGenerator:
+    case NewInternalFieldObject:
     case NewObject:
+    case MaterializeNewInternalFieldObject:
         ASSERT(!!node->structure().get());
         setForNode(node, node->structure());
         break;
@@ -2649,10 +3049,10 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             if (base.isNull())
                 structure = globalObject->nullPrototypeObjectStructure();
             else if (base.isObject())
-                structure = globalObject->vm().structureCache.emptyObjectStructureConcurrently(globalObject, base.getObject(), JSFinalObject::defaultInlineCapacity());
+                structure = m_vm.structureCache.emptyObjectStructureConcurrently(globalObject, base.getObject(), JSFinalObject::defaultInlineCapacity());
 
             if (structure) {
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
                 if (node->child1().useKind() == UntypedUse)
                     didFoldClobberWorld();
                 setForNode(node, structure);
@@ -2673,7 +3073,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
                 if (auto* rareData = structure->rareDataConcurrently()) {
                     if (!!rareData->cachedOwnKeysConcurrently()) {
                         if (m_graph.isWatchingHavingABadTimeWatchpoint(node)) {
-                            m_state.setFoundConstants(true);
+                            m_state.setShouldTryConstantFolding(true);
                             didFoldClobberWorld();
                             setTypeForNode(node, SpecArray);
                             break;
@@ -2694,7 +3094,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         AbstractValue& destination = forNode(node);
 
         if (!(source.m_type & ~SpecObject)) {
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
             if (node->op() == ToObject)
                 didFoldClobberWorld();
             destination = source;
@@ -2719,6 +3119,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case PhantomSpread:
     case PhantomNewArrayWithSpread:
     case PhantomNewArrayBuffer:
+    case PhantomNewInternalFieldObject:
     case PhantomNewRegexp:
     case BottomValue: {
         clearForNode(node);
@@ -2758,6 +3159,10 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             break;
         }
         setForNode(node, m_codeBlock->globalObjectFor(node->origin.semantic)->clonedArgumentsStructure());
+        break;
+
+    case CreateArgumentsButterfly:
+        setForNode(node, m_vm.immutableButterflyStructures[arrayIndexFromIndexingType(CopyOnWriteArrayWithContiguous) - NumberOfIndexingShapes].get());
         break;
 
     case NewGeneratorFunction:
@@ -2897,6 +3302,14 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case PutClosureVar:
         break;
 
+    case GetInternalField:
+        makeBytecodeTopForNode(node);
+        break;
+
+    case PutInternalField:
+        break;
+
+
     case GetRegExpObjectLastIndex:
         makeHeapTopForNode(node);
         break;
@@ -2919,6 +3332,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case TryGetById:
         // FIXME: This should constant fold at least as well as the normal GetById case.
         // https://bugs.webkit.org/show_bug.cgi?id=156422
+        clobberWorld();
         makeHeapTopForNode(node);
         break;
 
@@ -2929,8 +3343,8 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         AbstractValue& value = forNode(node->child1());
         if (value.m_structure.isFinite()
             && (node->child1().useKind() == CellUse || !(value.m_type & ~SpecCell))) {
-            UniquedStringImpl* uid = m_graph.identifiers()[node->identifierNumber()];
-            GetByIdStatus status = GetByIdStatus::computeFor(value.m_structure.toStructureSet(), uid);
+            UniquedStringImpl* uid = node->cacheableIdentifier().uid();
+            GetByStatus status = GetByStatus::computeFor(value.m_structure.toStructureSet(), uid);
             if (status.isSimple()) {
                 // Figure out what the result is going to be - is it TOP, a constant, or maybe
                 // something more subtle?
@@ -2945,7 +3359,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
                             value, status[i].offset(), m_state.structureClobberState()));
                 }
 
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
                 didFoldClobberWorld();
                 forNode(node) = result;
                 break;
@@ -2998,7 +3412,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         // more efficient. We currently don't.
 
         if (value.m_structure.isSubsetOf(set))
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
 
         SpeculatedType admittedTypes = SpecNone;
         switch (node->child1().useKind()) {
@@ -3023,7 +3437,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
         bool mayBeEmpty = value.m_type & SpecEmpty;
         if (!mayBeEmpty)
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
 
         SpeculatedType admittedTypes = mayBeEmpty ? SpecEmpty : SpecNone;
         filter(value, node->structureSet(), admittedTypes);
@@ -3040,7 +3454,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         if (value.value()) {
             if (Structure* structure = jsDynamicCast<Structure*>(m_vm, value.value())) {
                 if (set.contains(m_graph.registerStructure(structure))) {
-                    m_state.setFoundConstants(true);
+                    m_state.setShouldTryConstantFolding(true);
                     break;
                 }
             }
@@ -3060,7 +3474,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
                     allGood = false;
                 });
             if (allGood) {
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
                 break;
             }
         }
@@ -3078,7 +3492,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         if (!forNode(node->child1()).m_structure.isClear()) {
             if (forNode(node->child1()).m_structure.onlyStructure() == node->transition()->next) {
                 didFoldClobberStructures();
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
             } else {
                 observeTransition(
                     clobberLimit, node->transition()->previous, node->transition()->next);
@@ -3099,11 +3513,13 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             didFoldClobberStructures();
         clearForNode(node); // The result is not a JS value.
         break;
-    case CheckSubClass: {
+    case CheckJSCast: {
+        const ClassInfo* classInfo = node->classInfo();
         JSValue constant = forNode(node->child1()).value();
         if (constant) {
-            if (constant.isCell() && constant.asCell()->inherits(m_vm, node->classInfo())) {
-                m_state.setFoundConstants(true);
+            if (constant.isCell() && constant.asCell()->inherits(m_vm, classInfo)) {
+                ASSERT(!classInfo->inheritsJSTypeRange || classInfo->inheritsJSTypeRange->contains(constant.asCell()->type()));
+                m_state.setShouldTryConstantFolding(true);
                 ASSERT(constant);
                 break;
             }
@@ -3111,12 +3527,31 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
         AbstractValue& value = forNode(node->child1());
 
-        if (value.m_structure.isSubClassOf(node->classInfo()))
-            m_state.setFoundConstants(true);
+        if (value.m_structure.isSubClassOf(classInfo))
+            m_state.setShouldTryConstantFolding(true);
 
-        filterClassInfo(value, node->classInfo());
+        filterClassInfo(value, classInfo);
         break;
     }
+    case CheckNotJSCast: {
+        const ClassInfo* classInfo = node->classInfo();
+        JSValue constant = forNode(node->child1()).value();
+        if (constant) {
+            if (constant.isCell() && !constant.asCell()->inherits(m_vm, classInfo)) {
+                ASSERT(!classInfo->inheritsJSTypeRange || !classInfo->inheritsJSTypeRange->contains(constant.asCell()->type()));
+                m_state.setShouldTryConstantFolding(true);
+                ASSERT(constant);
+                break;
+            }
+        }
+
+        AbstractValue& value = forNode(node->child1());
+
+        if (value.m_structure.isNotSubClassOf(classInfo))
+            m_state.setShouldTryConstantFolding(true);
+        break;
+    }
+
     case CallDOMGetter: {
         CallDOMGetterData* callDOMGetterData = node->callDOMGetterData();
         DOMJIT::CallDOMGetterSnippet* snippet = callDOMGetterData->snippet;
@@ -3135,14 +3570,28 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         setTypeForNode(node, signature->result);
         break;
     }
+
+    case CheckArrayOrEmpty:
     case CheckArray: {
-        if (node->arrayMode().alreadyChecked(m_graph, node, forNode(node->child1()))) {
-            m_state.setFoundConstants(true);
+        AbstractValue& value = forNode(node->child1());
+
+        SpeculatedType admittedTypes = SpecNone;
+        if (node->op() == CheckArrayOrEmpty) {
+            bool mayBeEmpty = value.m_type & SpecEmpty;
+            if (!mayBeEmpty)
+                m_state.setShouldTryConstantFolding(true);
+            else
+                admittedTypes = SpecEmpty;
+        }
+
+        if (node->arrayMode().alreadyChecked(m_graph, node, value)) {
+            m_state.setShouldTryConstantFolding(true);
             break;
         }
+
         switch (node->arrayMode().type()) {
         case Array::String:
-            filter(node->child1(), SpecString);
+            filter(node->child1(), SpecString | admittedTypes);
             break;
         case Array::Int32:
         case Array::Double:
@@ -3152,52 +3601,53 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         case Array::SlowPutArrayStorage:
             break;
         case Array::DirectArguments:
-            filter(node->child1(), SpecDirectArguments);
+            filter(node->child1(), SpecDirectArguments | admittedTypes);
             break;
         case Array::ScopedArguments:
-            filter(node->child1(), SpecScopedArguments);
+            filter(node->child1(), SpecScopedArguments | admittedTypes);
             break;
         case Array::Int8Array:
-            filter(node->child1(), SpecInt8Array);
+            filter(node->child1(), SpecInt8Array | admittedTypes);
             break;
         case Array::Int16Array:
-            filter(node->child1(), SpecInt16Array);
+            filter(node->child1(), SpecInt16Array | admittedTypes);
             break;
         case Array::Int32Array:
-            filter(node->child1(), SpecInt32Array);
+            filter(node->child1(), SpecInt32Array | admittedTypes);
             break;
         case Array::Uint8Array:
-            filter(node->child1(), SpecUint8Array);
+            filter(node->child1(), SpecUint8Array | admittedTypes);
             break;
         case Array::Uint8ClampedArray:
-            filter(node->child1(), SpecUint8ClampedArray);
+            filter(node->child1(), SpecUint8ClampedArray | admittedTypes);
             break;
         case Array::Uint16Array:
-            filter(node->child1(), SpecUint16Array);
+            filter(node->child1(), SpecUint16Array | admittedTypes);
             break;
         case Array::Uint32Array:
-            filter(node->child1(), SpecUint32Array);
+            filter(node->child1(), SpecUint32Array | admittedTypes);
             break;
         case Array::Float32Array:
-            filter(node->child1(), SpecFloat32Array);
+            filter(node->child1(), SpecFloat32Array | admittedTypes);
             break;
         case Array::Float64Array:
-            filter(node->child1(), SpecFloat64Array);
+            filter(node->child1(), SpecFloat64Array | admittedTypes);
             break;
         case Array::AnyTypedArray:
-            filter(node->child1(), SpecTypedArrayView);
+            filter(node->child1(), SpecTypedArrayView | admittedTypes);
             break;
         default:
             RELEASE_ASSERT_NOT_REACHED();
             break;
         }
-        filterArrayModes(node->child1(), node->arrayMode().arrayModesThatPassFiltering());
+        filterArrayModes(node->child1(), node->arrayMode().arrayModesThatPassFiltering(), admittedTypes);
         break;
     }
+
     case Arrayify: {
         if (node->arrayMode().alreadyChecked(m_graph, node, forNode(node->child1()))) {
             didFoldClobberStructures();
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
             break;
         }
         ASSERT(node->arrayMode().conversion() == Array::Convert);
@@ -3208,7 +3658,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case ArrayifyToStructure: {
         AbstractValue& value = forNode(node->child1());
         if (value.m_structure.isSubsetOf(RegisteredStructureSet(node->structure())))
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
         clobberStructures();
 
         // We have a bunch of options of how to express the abstract set at this point. Let set S
@@ -3245,7 +3695,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         JSArrayBufferView* view = m_graph.tryGetFoldableView(
             forNode(node->child1()).m_value, node->arrayMode());
         if (view)
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
         clearForNode(node);
         break;
     }
@@ -3257,8 +3707,11 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case GetTypedArrayByteOffset: {
         JSArrayBufferView* view = m_graph.tryGetFoldableView(forNode(node->child1()).m_value);
         if (view) {
-            setConstant(node, jsNumber(view->byteOffset()));
-            break;
+            Optional<unsigned> byteOffset = view->byteOffsetConcurrently();
+            if (byteOffset) {
+                setConstant(node, jsNumber(*byteOffset));
+                break;
+            }
         }
         setNonCellTypeForNode(node, SpecInt32Only);
         break;
@@ -3270,9 +3723,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             bool canFold = !value.m_structure.isClear();
             JSValue prototype;
             value.m_structure.forEach([&] (RegisteredStructure structure) {
-                auto getPrototypeMethod = structure->classInfo()->methodTable.getPrototype;
-                MethodTable::GetPrototypeFunctionPtr defaultGetPrototype = JSObject::getPrototype;
-                if (getPrototypeMethod != defaultGetPrototype) {
+                if (structure->typeInfo().overridesGetPrototype()) {
                     canFold = false;
                     return;
                 }
@@ -3333,7 +3784,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
         setForNode(node, value);
         if (value.m_value)
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
         break;
     }
 
@@ -3346,12 +3797,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             break;
         }
 
-        if (base.value() && base.value().isObject()) {
-            setForNode(node, asObject(base.value())->globalObject()->getterSetterStructure());
-            break;
-        }
-
-        setTypeForNode(node, SpecObjectOther);
+        setForNode(node, m_vm.getterSetterStructure.get());
         break;
     }
 
@@ -3365,9 +3811,9 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         // contradiction then there must always be a contradiction even if subsequent passes don't
         // realize it. This is the case here.
 
-        // Ordinarily you have to be careful with calling setFoundConstants()
+        // Ordinarily you have to be careful with calling setShouldTryConstantFolding()
         // because of the effect on compile times, but this node is FTL-only.
-        m_state.setFoundConstants(true);
+        m_state.setShouldTryConstantFolding(true);
 
         AbstractValue base = forNode(node->child1());
         RegisteredStructureSet baseSet;
@@ -3411,9 +3857,9 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         RegisteredStructureSet newSet;
         TransitionVector transitions;
 
-        // Ordinarily you have to be careful with calling setFoundConstants()
+        // Ordinarily you have to be careful with calling setShouldTryConstantFolding()
         // because of the effect on compile times, but this node is FTL-only.
-        m_state.setFoundConstants(true);
+        m_state.setShouldTryConstantFolding(true);
 
         AbstractValue base = forNode(node->child1());
         AbstractValue originalValue = forNode(node->child2());
@@ -3459,6 +3905,42 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         break;
     }
 
+    case MultiDeleteByOffset: {
+        RegisteredStructureSet newSet;
+        TransitionVector transitions;
+
+        // Ordinarily you have to be careful with calling setShouldTryConstantFolding()
+        // because of the effect on compile times, but this node is FTL-only.
+        m_state.setShouldTryConstantFolding(true);
+
+        AbstractValue base = forNode(node->child1());
+
+        if (node->multiDeleteByOffsetData().writesStructures())
+            didFoldClobberStructures();
+
+        for (unsigned i = node->multiDeleteByOffsetData().variants.size(); i--;) {
+            const DeleteByIdVariant& variant = node->multiDeleteByOffsetData().variants[i];
+            RegisteredStructureSet thisSet = *m_graph.addStructureSet(variant.oldStructure());
+            thisSet.filter(base);
+            if (thisSet.isEmpty())
+                continue;
+
+            if (variant.newStructure()) {
+                RegisteredStructure newStructure = m_graph.registerStructure(variant.newStructure());
+                transitions.append(
+                    Transition(m_graph.registerStructure(variant.oldStructure()), newStructure));
+                newSet.add(newStructure);
+            } else
+                newSet.merge(thisSet);
+        }
+
+        observeTransitions(clobberLimit, transitions);
+        if (forNode(node->child1()).changeStructure(m_graph, newSet) == Contradiction)
+            m_state.setIsValid(false);
+        setNonCellTypeForNode(node, SpecBoolean);
+        break;
+    }
+
     case GetExecutable: {
         JSValue value = forNode(node->child1()).value();
         if (value) {
@@ -3472,14 +3954,13 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         break;
     }
 
-    case CheckCell: {
-        JSValue value = forNode(node->child1()).value();
-        if (value == node->cellOperand()->value()) {
-            m_state.setFoundConstants(true);
-            ASSERT(value);
+    case CheckIsConstant: {
+        AbstractValue& value = forNode(node->child1());
+        if (value.value() == node->constant()->value() && (value.value() || value.m_type == SpecEmpty)) {
+            m_state.setShouldTryConstantFolding(true);
             break;
         }
-        filterByValue(node->child1(), *node->cellOperand());
+        filterByValue(node->child1(), *node->constant());
         break;
     }
 
@@ -3487,7 +3968,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case CheckNotEmpty: {
         AbstractValue& value = forNode(node->child1());
         if (!(value.m_type & SpecEmpty)) {
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
             break;
         }
 
@@ -3495,21 +3976,29 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         break;
     }
 
-    case CheckStringIdent: {
+    case CheckIdent: {
         AbstractValue& value = forNode(node->child1());
         UniquedStringImpl* uid = node->uidOperand();
-        ASSERT(!(value.m_type & ~SpecStringIdent)); // Edge filtering should have already ensured this.
 
         JSValue childConstant = value.value();
         if (childConstant) {
-            ASSERT(childConstant.isString());
-            if (asString(childConstant)->tryGetValueImpl() == uid) {
-                m_state.setFoundConstants(true);
-                break;
+            if (childConstant.isString()) {
+                if (asString(childConstant)->tryGetValueImpl() == uid) {
+                    m_state.setShouldTryConstantFolding(true);
+                    break;
+                }
+            } else if (childConstant.isSymbol()) {
+                if (&jsCast<Symbol*>(childConstant)->uid() == uid) {
+                    m_state.setShouldTryConstantFolding(true);
+                    break;
+                }
             }
         }
 
-        filter(value, SpecStringIdent);
+        if (node->child1().useKind() == StringIdentUse)
+            filter(value, SpecStringIdent);
+        else
+            filter(value, SpecSymbol);
         break;
     }
 
@@ -3517,7 +4006,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         JSValue left = forNode(node->child1()).value();
         JSValue right = forNode(node->child2()).value();
         if (left && right && left.isInt32() && right.isInt32() && static_cast<uint32_t>(left.asInt32()) < static_cast<uint32_t>(right.asInt32()))
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
 
         // We claim we result in Int32. It's not really important what our result is (though we
         // don't want to claim we may result in the empty value), other nodes with data flow edges
@@ -3537,15 +4026,25 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             PutByIdStatus status = PutByIdStatus::computeFor(
                 m_graph.globalObjectFor(node->origin.semantic),
                 value.m_structure.toStructureSet(),
-                m_graph.identifiers()[node->identifierNumber()],
+                node->cacheableIdentifier().uid(),
                 node->op() == PutByIdDirect);
 
+            bool allGood = true;
             if (status.isSimple()) {
                 RegisteredStructureSet newSet;
                 TransitionVector transitions;
 
-                for (unsigned i = status.numVariants(); i--;) {
-                    const PutByIdVariant& variant = status[i];
+                for (const PutByIdVariant& variant : status.variants()) {
+                    for (const ObjectPropertyCondition& condition : variant.conditionSet()) {
+                        if (!m_graph.watchCondition(condition)) {
+                            allGood = false;
+                            break;
+                        }
+                    }
+
+                    if (!allGood)
+                        break;
+
                     if (variant.kind() == PutByIdVariant::Transition) {
                         RegisteredStructure newStructure = m_graph.registerStructure(variant.newStructure());
                         transitions.append(
@@ -3559,13 +4058,15 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
                 }
 
                 if (status.numVariants() == 1 || m_graph.m_plan.isFTL())
-                    m_state.setFoundConstants(true);
+                    m_state.setShouldTryConstantFolding(true);
 
-                didFoldClobberWorld();
-                observeTransitions(clobberLimit, transitions);
-                if (forNode(node->child1()).changeStructure(m_graph, newSet) == Contradiction)
-                    m_state.setIsValid(false);
-                break;
+                if (allGood) {
+                    didFoldClobberWorld();
+                    observeTransitions(clobberLimit, transitions);
+                    if (forNode(node->child1()).changeStructure(m_graph, newSet) == Contradiction)
+                        m_state.setIsValid(false);
+                    break;
+                }
             }
         }
 
@@ -3606,9 +4107,8 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         if (JSValue constant = property.value()) {
             if (constant.isString()) {
                 JSString* string = asString(constant);
-                const StringImpl* impl = string->tryGetValueImpl();
-                if (impl && impl->isAtom())
-                    m_state.setFoundConstants(true);
+                if (CacheableIdentifier::isCacheableIdentifierCell(string))
+                    m_state.setShouldTryConstantFolding(true);
             }
         }
 
@@ -3635,6 +4135,8 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         clobberWorld();
         break;
     }
+    case InStructureProperty:
+    case HasOwnStructureProperty:
     case HasStructureProperty: {
         setNonCellTypeForNode(node, SpecBoolean);
         clobberWorld();
@@ -3647,7 +4149,9 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         case Array::Double:
         case Array::Contiguous:
         case Array::ArrayStorage: {
-            break;
+            if (mode.isInBounds())
+                break;
+            FALLTHROUGH;
         }
         default: {
             clobberWorld();
@@ -3733,7 +4237,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         for (MatchStructureVariant& variant : node->matchStructureData().variants) {
             RegisteredStructure structure = variant.structure;
             if (!base.contains(structure)) {
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
                 continue;
             }
 
@@ -3765,7 +4269,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         // The state of this node would have already been decided, but it may have become a
         // constant, in which case we'd like to know.
         if (forNode(node).m_value)
-            m_state.setFoundConstants(true);
+            m_state.setShouldTryConstantFolding(true);
         break;
 
     case Upsilon: {
@@ -3799,7 +4303,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         break;
 
     case ForceOSRExit:
-    case CheckBadCell:
+    case CheckBadValue:
         m_state.setIsValid(false);
         break;
 
@@ -3824,6 +4328,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case CountExecution:
     case CheckTierUpInLoop:
     case CheckTierUpAtReturn:
+    case CheckNeutered:
     case SuperSamplerBegin:
     case SuperSamplerEnd:
     case CheckTierUpAndOSREnter:
@@ -3831,9 +4336,10 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     case ZombieHint:
     case ExitOK:
     case FilterCallLinkStatus:
-    case FilterGetByIdStatus:
+    case FilterGetByStatus:
     case FilterPutByIdStatus:
     case FilterInByIdStatus:
+    case FilterDeleteByStatus:
     case ClearCatchLocals:
         break;
 
@@ -3843,7 +4349,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         ASSERT(bits);
         if (bits == ImplementsDefaultHasInstance) {
             if (abstractValue.m_type == SpecFunctionWithDefaultHasInstance) {
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
                 break;
             }
         }
@@ -3854,7 +4360,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
                 // and we can read its inline type info flags. These flags don't change over the
                 // object's lifetime.
                 if ((value.asCell()->inlineTypeFlags() & bits) == bits) {
-                    m_state.setFoundConstants(true);
+                    m_state.setShouldTryConstantFolding(true);
                     break;
                 }
             }
@@ -3866,7 +4372,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
                 ok &= (structure->typeInfo().inlineTypeFlags() & bits) == bits;
             });
             if (ok) {
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
                 break;
             }
         }
@@ -3885,7 +4391,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
 
             if (radix.isNumber()
                 && (radix.asNumber() == 0 || radix.asNumber() == 10)) {
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
                 if (node->child1().useKind() == UntypedUse)
                     didFoldClobberWorld();
                 setNonCellTypeForNode(node, SpecInt32Only);
@@ -3917,7 +4423,7 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
             if (!edge)
                 return;
             if (edge.isProved() || edge.willNotHaveCheck())
-                m_state.setFoundConstants(true);
+                m_state.setShouldTryConstantFolding(true);
         });
         break;
     }
@@ -3948,6 +4454,16 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
     }
 
     case DataViewGetFloat: {
+        setNonCellTypeForNode(node, SpecFullDouble);
+        break;
+    }
+
+    case DateGetInt32OrNaN: {
+        setNonCellTypeForNode(node, SpecInt32Only | SpecDoublePureNaN);
+        break;
+    }
+
+    case DateGetTime: {
         setNonCellTypeForNode(node, SpecFullDouble);
         break;
     }
@@ -3984,10 +4500,10 @@ void AbstractInterpreter<AbstractStateType>::filterICStatus(Node* node)
             node->callLinkStatus()->filter(m_vm, value);
         break;
 
-    case FilterGetByIdStatus: {
+    case FilterGetByStatus: {
         AbstractValue& value = forNode(node->child1());
         if (value.m_structure.isFinite())
-            node->getByIdStatus()->filter(value.m_structure.toStructureSet());
+            node->getByStatus()->filter(value.m_structure.toStructureSet());
         break;
     }
 
@@ -4002,6 +4518,13 @@ void AbstractInterpreter<AbstractStateType>::filterICStatus(Node* node)
         AbstractValue& value = forNode(node->child1());
         if (value.m_structure.isFinite())
             node->putByIdStatus()->filter(value.m_structure.toStructureSet());
+        break;
+    }
+
+    case FilterDeleteByStatus: {
+        AbstractValue& value = forNode(node->child1());
+        if (value.m_structure.isFinite())
+            node->deleteByStatus()->filter(value.m_structure.toStructureSet());
         break;
     }
 
@@ -4070,10 +4593,8 @@ void AbstractInterpreter<AbstractStateType>::forAllValues(
                 functor(forNode(node));
         }
     }
-    for (size_t i = m_state.numberOfArguments(); i--;)
-        functor(m_state.argument(i));
-    for (size_t i = m_state.numberOfLocals(); i--;)
-        functor(m_state.local(i));
+    for (size_t i = m_state.size(); i--;)
+        functor(m_state.atIndex(i));
 }
 
 template<typename AbstractStateType>
@@ -4128,7 +4649,7 @@ void AbstractInterpreter<AbstractStateType>::observeTransitions(
     AbstractValue::TransitionsObserver transitionsObserver(vector);
     forAllValues(clobberLimit, transitionsObserver);
 
-    if (!ASSERT_DISABLED) {
+    if (ASSERT_ENABLED) {
         // We don't need to claim to be in a clobbered state because none of the Transition::previous structures are watchable.
         for (unsigned i = vector.size(); i--;)
             ASSERT(!vector[i].previous->dfgShouldWatch());
@@ -4191,9 +4712,9 @@ FiltrationResult AbstractInterpreter<AbstractStateType>::filter(
 
 template<typename AbstractStateType>
 FiltrationResult AbstractInterpreter<AbstractStateType>::filterArrayModes(
-    AbstractValue& value, ArrayModes arrayModes)
+    AbstractValue& value, ArrayModes arrayModes, SpeculatedType admittedTypes)
 {
-    if (value.filterArrayModes(arrayModes) == FiltrationOK)
+    if (value.filterArrayModes(arrayModes, admittedTypes) == FiltrationOK)
         return FiltrationOK;
     m_state.setIsValid(false);
     return Contradiction;

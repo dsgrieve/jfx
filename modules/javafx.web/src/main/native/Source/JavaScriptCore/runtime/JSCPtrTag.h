@@ -35,11 +35,14 @@ using PtrTag = WTF::PtrTag;
     v(B3CCallPtrTag) \
     v(B3CompilationPtrTag) \
     v(BytecodePtrTag) \
-    v(CopyFunctionPtrTag) \
     v(DOMJITFunctionPtrTag) \
     v(DisassemblyPtrTag) \
     v(ExceptionHandlerPtrTag) \
     v(ExecutableMemoryPtrTag) \
+    v(JITProbePtrTag) \
+    v(JITProbeTrampolinePtrTag) \
+    v(JITProbeExecutorPtrTag) \
+    v(JITProbeStackInitializationFunctionPtrTag) \
     v(JITThunkPtrTag) \
     v(JITStubRoutinePtrTag) \
     v(JSEntryPtrTag) \

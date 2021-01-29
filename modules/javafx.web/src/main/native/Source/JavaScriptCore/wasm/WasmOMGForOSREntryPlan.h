@@ -43,19 +43,19 @@ class OMGForOSREntryPlan final : public Plan {
 public:
     using Base = Plan;
 
-    bool hasWork() const override { return !m_completed; }
-    void work(CompilationEffort) override;
-    bool multiThreaded() const override { return false; }
+    bool hasWork() const final { return !m_completed; }
+    void work(CompilationEffort) final;
+    bool multiThreaded() const final { return false; }
 
     // Note: CompletionTask should not hold a reference to the Plan otherwise there will be a reference cycle.
-    OMGForOSREntryPlan(Context*, Ref<Module>&&, Ref<BBQCallee>&&, uint32_t functionIndex, uint32_t loopIndex, MemoryMode, CompletionTask&&);
+    OMGForOSREntryPlan(Context*, Ref<Module>&&, Ref<Callee>&&, uint32_t functionIndex, uint32_t loopIndex, MemoryMode, CompletionTask&&);
 
 private:
     // For some reason friendship doesn't extend to parent classes...
     using Base::m_lock;
 
-    bool isComplete() const override { return m_completed; }
-    void complete(const AbstractLocker& locker) override
+    bool isComplete() const final { return m_completed; }
+    void complete(const AbstractLocker& locker) final
     {
         m_completed = true;
         runCompletionTasks(locker);
@@ -63,7 +63,7 @@ private:
 
     Ref<Module> m_module;
     Ref<CodeBlock> m_codeBlock;
-    Ref<BBQCallee> m_callee;
+    Ref<Callee> m_callee;
     bool m_completed { false };
     uint32_t m_functionIndex;
     uint32_t m_loopIndex;

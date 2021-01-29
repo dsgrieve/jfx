@@ -26,6 +26,9 @@
 #pragma once
 
 #include <wtf/Forward.h>
+#include <wtf/Markable.h>
+#include <wtf/Optional.h>
+#include <wtf/WeakPtr.h>
 #include <wtf/text/StringBuilder.h>
 
 namespace WTF {
@@ -57,6 +60,7 @@ public:
     }
 
     WTF_EXPORT_PRIVATE TextStream& operator<<(bool);
+    WTF_EXPORT_PRIVATE TextStream& operator<<(char);
     WTF_EXPORT_PRIVATE TextStream& operator<<(int);
     WTF_EXPORT_PRIVATE TextStream& operator<<(unsigned);
     WTF_EXPORT_PRIVATE TextStream& operator<<(long);
@@ -173,6 +177,42 @@ inline TextStream& indent(TextStream& ts)
     return ts;
 }
 
+template<typename T>
+struct ValueOrNull {
+    explicit ValueOrNull(T* inValue)
+        : value(inValue)
+    { }
+    T* value;
+};
+
+template<typename T>
+TextStream& operator<<(TextStream& ts, ValueOrNull<T> item)
+{
+    if (item.value)
+        ts << *item.value;
+    else
+        ts << "null";
+    return ts;
+}
+
+template<typename Item>
+TextStream& operator<<(TextStream& ts, const Optional<Item>& item)
+{
+    if (item)
+        return ts << item.value();
+
+    return ts << "nullopt";
+}
+
+template<typename T, typename Traits>
+TextStream& operator<<(TextStream& ts, const Markable<T, Traits>& item)
+{
+    if (item)
+        return ts << item.value();
+
+    return ts << "unset";
+}
+
 template<typename Item>
 TextStream& operator<<(TextStream& ts, const Vector<Item>& vector)
 {
@@ -183,6 +223,47 @@ TextStream& operator<<(TextStream& ts, const Vector<Item>& vector)
         ts << vector[i];
         if (i < size - 1)
             ts << ", ";
+    }
+
+    return ts << "]";
+}
+
+template<typename T>
+TextStream& operator<<(TextStream& ts, const WeakPtr<T>& item)
+{
+    if (item)
+        return ts << *item;
+
+    return ts << "null";
+}
+
+template<typename KeyArg, typename MappedArg, typename HashArg, typename KeyTraitsArg, typename MappedTraitsArg>
+TextStream& operator<<(TextStream& ts, const HashMap<KeyArg, MappedArg, HashArg, KeyTraitsArg, MappedTraitsArg>& map)
+{
+    ts << "{";
+
+    bool first = true;
+    for (const auto& keyValuePair : map) {
+        ts << keyValuePair.key << ": " << keyValuePair.value;
+        if (!first)
+            ts << ", ";
+        first = false;
+    }
+
+    return ts << "}";
+}
+
+template<typename ValueArg, typename HashArg, typename TraitsArg>
+TextStream& operator<<(TextStream& ts, const HashSet<ValueArg, HashArg, TraitsArg>& set)
+{
+    ts << "[";
+
+    bool first = true;
+    for (const auto& item : set) {
+        ts << item;
+        if (!first)
+            ts << ", ";
+        first = false;
     }
 
     return ts << "]";
@@ -208,4 +289,5 @@ WTF_EXPORT_PRIVATE void writeIndent(TextStream&, int indent);
 } // namespace WTF
 
 using WTF::TextStream;
+using WTF::ValueOrNull;
 using WTF::indent;

@@ -31,6 +31,10 @@ if (NOT DEFINED ENABLE_TOOLS AND EXISTS "${CMAKE_SOURCE_DIR}/Tools")
     set(ENABLE_TOOLS ON)
 endif ()
 
+if (NOT DEFINED ENABLE_WEBINSPECTORUI)
+    set(ENABLE_WEBINSPECTORUI ON)
+endif ()
+
 # -----------------------------------------------------------------------------
 # Determine which port will be built
 # -----------------------------------------------------------------------------
@@ -146,8 +150,13 @@ set(WTF_LIBRARY_TYPE STATIC)
 set(JavaScriptCore_LIBRARY_TYPE STATIC)
 set(PAL_LIBRARY_TYPE STATIC)
 set(WebCore_LIBRARY_TYPE STATIC)
-set(WebKitLegacy_LIBRARY_TYPE SHARED)
-set(WebKit_LIBRARY_TYPE SHARED)
+if (DEFINED STATIC_BUILD)
+    set(WebKitLegacy_LIBRARY_TYPE STATIC)
+    set(WebKit_LIBRARY_TYPE STATIC)
+else ()
+    set(WebKitLegacy_LIBRARY_TYPE SHARED)
+    set(WebKit_LIBRARY_TYPE SHARED)
+endif ()
 set(WebCoreTestSupport_LIBRARY_TYPE STATIC)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE True)
@@ -188,14 +197,8 @@ if (ENABLE_TOOLS)
     add_subdirectory(Tools)
 endif ()
 
-if ("${PORT}" STREQUAL "GTK" OR "${PORT}" STREQUAL "WPE")
-    if (DEVELOPER_MODE)
-        add_subdirectory(PerformanceTests)
-    endif ()
-else ()
-    if (NOT PORT STREQUAL Java)
+if (DEVELOPER_MODE AND NOT PORT STREQUAL Java)
     add_subdirectory(PerformanceTests)
-    endif ()
 endif ()
 
 # -----------------------------------------------------------------------------

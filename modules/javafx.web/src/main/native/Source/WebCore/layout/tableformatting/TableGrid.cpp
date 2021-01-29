@@ -35,23 +35,14 @@ namespace Layout {
 
 WTF_MAKE_ISO_ALLOCATED_IMPL(TableGrid);
 
-void TableGrid::Column::setWidthConstraints(FormattingContext::IntrinsicWidthConstraints widthConstraints)
+TableGrid::Column::Column(const ContainerBox* columnBox)
+    : m_layoutBox(makeWeakPtr(columnBox))
 {
-#ifndef NDEBUG
-    m_hasWidthConstraints = true;
-#endif
-    m_widthConstraints = widthConstraints;
-}
-
-FormattingContext::IntrinsicWidthConstraints TableGrid::Column::widthConstraints() const
-{
-    ASSERT(m_hasWidthConstraints);
-    return m_widthConstraints;
 }
 
 void TableGrid::Column::setLogicalWidth(LayoutUnit computedLogicalWidth)
 {
-#ifndef NDEBUG
+#if ASSERT_ENABLED
     m_hasComputedWidth = true;
 #endif
     m_computedLogicalWidth = computedLogicalWidth;
@@ -65,7 +56,7 @@ LayoutUnit TableGrid::Column::logicalWidth() const
 
 void TableGrid::Column::setLogicalLeft(LayoutUnit computedLogicalLeft)
 {
-#ifndef NDEBUG
+#if ASSERT_ENABLED
     m_hasComputedLeft = true;
 #endif
     m_computedLogicalLeft = computedLogicalLeft;
@@ -77,26 +68,56 @@ LayoutUnit TableGrid::Column::logicalLeft() const
     return m_computedLogicalLeft;
 }
 
-void TableGrid::ColumnsContext::addColumn()
+bool TableGrid::Column::isFixedWidth() const
 {
-    m_columns.append({ });
+    return hasFixedWidthCell() || (box() && box()->columnWidth());
 }
 
-void TableGrid::ColumnsContext::useAsLogicalWidth(WidthConstraintsType type)
+void TableGrid::Columns::addColumn(const ContainerBox& columnBox)
 {
-    for (auto& column : m_columns)
-        column.setLogicalWidth(type == WidthConstraintsType::Minimum ? column.widthConstraints().minimum : column.widthConstraints().maximum);
+    m_columnList.append({ &columnBox });
 }
 
-TableGrid::CellInfo::CellInfo(const Box& tableCellBox, SlotPosition position, CellSize size)
-    : tableCellBox(tableCellBox)
-    , position(position)
-    , size(size)
+void TableGrid::Columns::addAnonymousColumn()
+{
+    m_columnList.append({ nullptr });
+}
+
+bool TableGrid::Columns::hasFixedColumnsOnly() const
+{
+    for (auto& column : m_columnList) {
+        if (!column.isFixedWidth())
+            return false;
+    }
+    return true;
+}
+
+void TableGrid::Rows::addRow(const ContainerBox& rowBox)
+{
+    m_rowList.append({ rowBox });
+}
+
+TableGrid::Row::Row(const ContainerBox& rowBox)
+    : m_layoutBox(makeWeakPtr(rowBox))
 {
 }
 
-TableGrid::SlotInfo::SlotInfo(CellInfo& cell)
-    : cell(makeWeakPtr(cell))
+TableGrid::Cell::Cell(const ContainerBox& cellBox, SlotPosition position, CellSpan span)
+    : m_layoutBox(makeWeakPtr(cellBox))
+    , m_position(position)
+    , m_span(span)
+{
+}
+
+bool TableGrid::Cell::isFixedWidth() const
+{
+    return box().style().logicalWidth().isFixed();
+}
+
+TableGrid::Slot::Slot(Cell& cell, bool isColumnSpanned, bool isRowSpanned)
+    : m_cell(makeWeakPtr(cell))
+    , m_isColumnSpanned(isColumnSpanned)
+    , m_isRowSpanned(isRowSpanned)
 {
 }
 
@@ -104,72 +125,71 @@ TableGrid::TableGrid()
 {
 }
 
-TableGrid::SlotInfo* TableGrid::slot(SlotPosition position)
+TableGrid::Slot* TableGrid::slot(SlotPosition position)
 {
     return m_slotMap.get(position);
 }
 
-void TableGrid::appendCell(const Box& tableCellBox)
+void TableGrid::appendCell(const ContainerBox& cellBox)
 {
-    int rowSpan = tableCellBox.rowSpan();
-    int columnSpan = tableCellBox.columnSpan();
-    auto isInNewRow = !tableCellBox.previousSibling();
+    auto rowSpan = cellBox.rowSpan();
+    auto columnSpan = cellBox.columnSpan();
+    auto isInNewRow = !cellBox.previousSibling();
     auto initialSlotPosition = SlotPosition { };
 
-    if (!m_cellList.isEmpty()) {
-        auto& lastCell = m_cellList.last();
-        auto lastSlotPosition = lastCell->position;
+    if (!m_cells.isEmpty()) {
+        auto& lastCell = m_cells.last();
+        auto lastSlotPosition = lastCell->position();
         // First table cell in this row?
         if (isInNewRow)
-            initialSlotPosition = SlotPosition { 0, lastSlotPosition.y() + 1 };
+            initialSlotPosition = SlotPosition { 0, lastSlotPosition.row + 1 };
         else
-            initialSlotPosition = SlotPosition { lastSlotPosition.x() + 1, lastSlotPosition.y() };
+            initialSlotPosition = SlotPosition { lastSlotPosition.column + 1, lastSlotPosition.row };
 
         // Pick the next available slot by avoiding row and column spanners.
         while (true) {
             if (!m_slotMap.contains(initialSlotPosition))
                 break;
-            initialSlotPosition.move(1, 0);
+            ++initialSlotPosition.column;
         }
     }
-    auto cellInfo = makeUnique<CellInfo>(tableCellBox, initialSlotPosition, CellSize { rowSpan, columnSpan });
+    auto cell = makeUnique<Cell>(cellBox, initialSlotPosition, CellSpan { columnSpan, rowSpan });
     // Row and column spanners create additional slots.
-    for (int row = 1; row <= rowSpan; ++row) {
-        for (int column = 1; column <= columnSpan; ++column) {
-            auto position = SlotPosition { initialSlotPosition.x() + row - 1, initialSlotPosition.y() + column - 1 };
+    for (size_t row = 0; row < rowSpan; ++row) {
+        for (auto column = cell->startColumn(); column < cell->endColumn(); ++column) {
+            auto position = SlotPosition { column, cell->startRow() + row };
             ASSERT(!m_slotMap.contains(position));
-            m_slotMap.add(position, makeUnique<SlotInfo>(*cellInfo));
+            // This slot is spanned by a cell at the initial slow position.
+            auto isColumnSpanned = column != cell->startColumn();
+            auto isRowSpanned = !!row;
+            m_slotMap.add(position, makeUnique<Slot>(*cell, isColumnSpanned, isRowSpanned));
         }
     }
     // Initialize columns/rows if needed.
-    auto missingNumberOfColumns = std::max<unsigned>(0, (initialSlotPosition.x() + columnSpan) - m_columnsContext.columns().size());
-    for (unsigned column = 0; column < missingNumberOfColumns; ++column)
-        m_columnsContext.addColumn();
+    auto missingNumberOfColumns = std::max<int>(0, initialSlotPosition.column + columnSpan - m_columns.size());
+    for (auto column = 0; column < missingNumberOfColumns; ++column)
+        m_columns.addAnonymousColumn();
+
+    if (cell->isFixedWidth()) {
+        for (auto column = cell->startColumn(); column < cell->endColumn(); ++column)
+            m_columns.list()[column].setHasFixedWidthCell();
+    }
 
     if (isInNewRow)
-        m_rows.append({ });
+        m_rows.addRow(cellBox.parent());
 
-    m_cellList.add(WTFMove(cellInfo));
+    m_cells.add(WTFMove(cell));
 }
 
-void TableGrid::insertCell(const Box& tableCellBox, const Box& before)
+void TableGrid::insertCell(const ContainerBox& cellBox, const ContainerBox& before)
 {
-    UNUSED_PARAM(tableCellBox);
+    UNUSED_PARAM(cellBox);
     UNUSED_PARAM(before);
 }
 
-void TableGrid::removeCell(const Box& tableCellBox)
+void TableGrid::removeCell(const ContainerBox& cellBox)
 {
-    UNUSED_PARAM(tableCellBox);
-}
-
-FormattingContext::IntrinsicWidthConstraints TableGrid::widthConstraints() const
-{
-    // FIXME: We should probably cache this value.
-    auto widthConstraints = FormattingContext::IntrinsicWidthConstraints { };
-    for (auto& column : m_columnsContext.columns())
-        widthConstraints += column.widthConstraints();
-    return widthConstraints;
+    UNUSED_PARAM(cellBox);
 }
 
 }

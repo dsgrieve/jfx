@@ -39,6 +39,7 @@
 #include <JavaScriptCore/JSArrayBufferView.h>
 #include <JavaScriptCore/JSCTestRunnerUtils.h>
 #include <JavaScriptCore/JSContextRef.h>
+#include <JavaScriptCore/JSGlobalObjectInlines.h>
 #include <JavaScriptCore/JSObjectRef.h>
 #include <JavaScriptCore/JSRetainPtr.h>
 #include <JavaScriptCore/TypedArrayInlines.h>
@@ -585,6 +586,9 @@ static JSValueRef overridePreferenceCallback(JSContextRef context, JSObjectRef f
     auto value = adopt(JSValueToStringCopy(context, arguments[1], exception));
     ASSERT(!*exception);
 
+    // Should use `<!-- webkit-test-runner [ enableBackForwardCache=true ] -->` instead.
+    RELEASE_ASSERT(!JSStringIsEqualToUTF8CString(key.get(), "WebKitUsesBackForwardCachePreferenceKey"));
+
     TestRunner* controller = static_cast<TestRunner*>(JSObjectGetPrivate(thisObject));
     controller->overridePreference(key.get(), value.get());
 
@@ -1130,6 +1134,30 @@ static JSValueRef setPrivateBrowsingEnabledCallback(JSContextRef context, JSObje
     return JSValueMakeUndefined(context);
 }
 
+static JSValueRef setShouldSwapToEphemeralSessionOnNextNavigationCallback(JSContextRef context, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
+{
+    // Has mac & windows implementation
+    if (argumentCount < 1)
+        return JSValueMakeUndefined(context);
+
+    TestRunner* controller = static_cast<TestRunner*>(JSObjectGetPrivate(thisObject));
+    controller->setShouldSwapToEphemeralSessionOnNextNavigation(JSValueToBoolean(context, arguments[0]));
+
+    return JSValueMakeUndefined(context);
+}
+
+static JSValueRef setShouldSwapToDefaultSessionOnNextNavigationCallback(JSContextRef context, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
+{
+    // Has mac & windows implementation
+    if (argumentCount < 1)
+        return JSValueMakeUndefined(context);
+
+    TestRunner* controller = static_cast<TestRunner*>(JSObjectGetPrivate(thisObject));
+    controller->setShouldSwapToDefaultSessionOnNextNavigation(JSValueToBoolean(context, arguments[0]));
+
+    return JSValueMakeUndefined(context);
+}
+
 static JSValueRef setJavaScriptCanAccessClipboardCallback(JSContextRef context, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
 {
     // Has mac & windows implementation
@@ -1508,7 +1536,7 @@ static JSValueRef waitForPolicyDelegateCallback(JSContextRef context, JSObjectRe
     return JSValueMakeUndefined(context);
 }
 
-static JSValueRef addOriginAccessWhitelistEntryCallback(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
+static JSValueRef addOriginAccessAllowListEntryCallback(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
 {
     if (argumentCount != 4)
         return JSValueMakeUndefined(context);
@@ -1522,11 +1550,11 @@ static JSValueRef addOriginAccessWhitelistEntryCallback(JSContextRef context, JS
     bool allowDestinationSubdomains = JSValueToBoolean(context, arguments[3]);
 
     TestRunner* controller = static_cast<TestRunner*>(JSObjectGetPrivate(thisObject));
-    controller->addOriginAccessWhitelistEntry(sourceOrigin.get(), destinationProtocol.get(), destinationHost.get(), allowDestinationSubdomains);
+    controller->addOriginAccessAllowListEntry(sourceOrigin.get(), destinationProtocol.get(), destinationHost.get(), allowDestinationSubdomains);
     return JSValueMakeUndefined(context);
 }
 
-static JSValueRef removeOriginAccessWhitelistEntryCallback(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
+static JSValueRef removeOriginAccessAllowListEntryCallback(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
 {
     if (argumentCount != 4)
         return JSValueMakeUndefined(context);
@@ -1540,7 +1568,7 @@ static JSValueRef removeOriginAccessWhitelistEntryCallback(JSContextRef context,
     bool allowDestinationSubdomains = JSValueToBoolean(context, arguments[3]);
 
     TestRunner* controller = static_cast<TestRunner*>(JSObjectGetPrivate(thisObject));
-    controller->removeOriginAccessWhitelistEntry(sourceOrigin.get(), destinationProtocol.get(), destinationHost.get(), allowDestinationSubdomains);
+    controller->removeOriginAccessAllowListEntry(sourceOrigin.get(), destinationProtocol.get(), destinationHost.get(), allowDestinationSubdomains);
     return JSValueMakeUndefined(context);
 }
 
@@ -1748,16 +1776,6 @@ static JSValueRef setSpellCheckerLoggingEnabledCallback(JSContextRef context, JS
     return JSValueMakeUndefined(context);
 }
 
-static JSValueRef setSpellCheckerResultsCallback(JSContextRef context, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
-{
-    if (argumentCount < 1)
-        return JSValueMakeUndefined(context);
-
-    auto* runner = static_cast<TestRunner*>(JSObjectGetPrivate(thisObject));
-    runner->setSpellCheckerResults(context, JSValueToObject(context, arguments[0], nullptr));
-    return JSValueMakeUndefined(context);
-}
-
 static JSValueRef setOpenPanelFilesCallback(JSContextRef context, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
 {
     if (argumentCount == 1)
@@ -1765,14 +1783,14 @@ static JSValueRef setOpenPanelFilesCallback(JSContextRef context, JSObjectRef fu
     return JSValueMakeUndefined(context);
 }
 
-#if PLATFORM(IOS_FAMILY)
 static JSValueRef SetOpenPanelFilesMediaIconCallback(JSContextRef context, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
 {
+#if PLATFORM(IOS_FAMILY)
     if (argumentCount == 1)
         static_cast<TestRunner*>(JSObjectGetPrivate(thisObject))->setOpenPanelFilesMediaIcon(context, arguments[0]);
+#endif
     return JSValueMakeUndefined(context);
 }
-#endif
 
 // Static Values
 
@@ -2008,12 +2026,8 @@ static JSValueRef accummulateLogsForChannel(JSContextRef context, JSObjectRef fu
     ASSERT(!*exception);
 
     TestRunner* controller = static_cast<TestRunner*>(JSObjectGetPrivate(thisObject));
-#if OS(WINDOWS) && PLATFORM(JAVA)
-    // FIXME : error LNK2019: unresolved external symbol
-    // controller->setAccummulateLogsForChannel(channel.get());
-#else
     controller->setAccummulateLogsForChannel(channel.get());
-#endif
+
     return JSValueMakeUndefined(context);
 }
 
@@ -2185,7 +2199,7 @@ JSStaticFunction* TestRunner::staticFunctions()
         { "queueNonLoadingScript", queueNonLoadingScriptCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "queueReload", queueReloadCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "removeAllVisitedLinks", removeAllVisitedLinksCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
-        { "removeOriginAccessWhitelistEntry", removeOriginAccessWhitelistEntryCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
+        { "removeOriginAccessAllowListEntry", removeOriginAccessAllowListEntryCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "repaintSweepHorizontally", repaintSweepHorizontallyCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "resetPageVisibility", resetPageVisibilityCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setAcceptsEditing", setAcceptsEditingCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
@@ -2225,7 +2239,9 @@ JSStaticFunction* TestRunner::staticFunctions()
         { "setPopupBlockingEnabled", setPopupBlockingEnabledCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setPluginsEnabled", setPluginsEnabledCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setPrinting", setPrintingCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
-        { "setPrivateBrowsingEnabled", setPrivateBrowsingEnabledCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
+        { "setPrivateBrowsingEnabled_DEPRECATED", setPrivateBrowsingEnabledCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
+        { "setShouldSwapToEphemeralSessionOnNextNavigation", setShouldSwapToEphemeralSessionOnNextNavigationCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
+        { "setShouldSwapToDefaultSessionOnNextNavigation", setShouldSwapToDefaultSessionOnNextNavigationCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setSerializeHTTPLoads", setSerializeHTTPLoadsCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setSpatialNavigationEnabled", setSpatialNavigationEnabledCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setStopProvisionalFrameLoads", setStopProvisionalFrameLoadsCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
@@ -2252,7 +2268,7 @@ JSStaticFunction* TestRunner::staticFunctions()
         { "waitForPolicyDelegate", waitForPolicyDelegateCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "waitUntilDone", waitUntilDoneCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "windowCount", windowCountCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
-        { "addOriginAccessWhitelistEntry", addOriginAccessWhitelistEntryCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
+        { "addOriginAccessAllowListEntry", addOriginAccessAllowListEntryCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setScrollbarPolicy", setScrollbarPolicyCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "authenticateSession", authenticateSessionCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setShouldPaintBrokenImage", setShouldPaintBrokenImageCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
@@ -2277,11 +2293,8 @@ JSStaticFunction* TestRunner::staticFunctions()
         { "runUIScript", runUIScriptCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "imageCountInGeneralPasteboard", imageCountInGeneralPasteboardCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setSpellCheckerLoggingEnabled", setSpellCheckerLoggingEnabledCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
-        { "setSpellCheckerResults", setSpellCheckerResultsCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setOpenPanelFiles", setOpenPanelFilesCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
-#if PLATFORM(IOS_FAMILY)
         { "setOpenPanelFilesMediaIcon", SetOpenPanelFilesMediaIconCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
-#endif
         { "forceImmediateCompletion", forceImmediateCompletionCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { 0, 0, 0 }
     };
@@ -2389,12 +2402,7 @@ void TestRunner::setAccummulateLogsForChannel(JSStringRef channel)
     auto buffer = makeUniqueArray<char>(maxLength + 1);
     JSStringGetUTF8CString(channel, buffer.get(), maxLength + 1);
 
-#if OS(WINDOWS) && PLATFORM(JAVA)
-    // FIXME : error LNK2019: unresolved external symbol
-    // WebCoreTestSupport::setLogChannelToAccumulate({ buffer.get() });
-#else
     WebCoreTestSupport::setLogChannelToAccumulate({ buffer.get() });
-#endif
 }
 
 typedef WTF::HashMap<unsigned, JSValueRef> CallbackMap;
@@ -2463,7 +2471,7 @@ void TestRunner::runUIScript(JSContextRef context, JSStringRef script, JSValueRe
     if (!m_UIScriptContext)
         m_UIScriptContext = makeUniqueWithoutFastMallocCheck<WTR::UIScriptContext>(*this);
 
-    String scriptString(JSStringGetCharactersPtr(script), JSStringGetLength(script));
+    String scriptString(reinterpret_cast<const UChar*>(JSStringGetCharactersPtr(script)), JSStringGetLength(script));
     m_UIScriptContext->runUIScript(scriptString, callbackID);
 }
 
@@ -2495,12 +2503,7 @@ void TestRunner::uiScriptDidComplete(const String& result, unsigned callbackID)
 
 void TestRunner::setAllowsAnySSLCertificate(bool allowsAnySSLCertificate)
 {
-#if OS(WINDOWS) && PLATFORM(JAVA)
-    // FIXME : error LNK2019: unresolved external symbol
-    // WebCoreTestSupport::setAllowsAnySSLCertificate(allowsAnySSLCertificate);
-#else
     WebCoreTestSupport::setAllowsAnySSLCertificate(allowsAnySSLCertificate);
-#endif
 }
 
 void TestRunner::setOpenPanelFiles(JSContextRef context, JSValueRef filesValue)
@@ -2550,4 +2553,14 @@ void TestRunner::setOpenPanelFilesMediaIcon(JSContextRef context, JSValueRef med
 void TestRunner::cleanup()
 {
     clearTestRunnerCallbacks();
+}
+
+void TestRunner::willNavigate()
+{
+    if (m_shouldSwapToEphemeralSessionOnNextNavigation || m_shouldSwapToDefaultSessionOnNextNavigation) {
+        ASSERT(m_shouldSwapToEphemeralSessionOnNextNavigation != m_shouldSwapToDefaultSessionOnNextNavigation);
+        setPrivateBrowsingEnabled(m_shouldSwapToEphemeralSessionOnNextNavigation);
+        m_shouldSwapToEphemeralSessionOnNextNavigation = false;
+        m_shouldSwapToDefaultSessionOnNextNavigation = false;
+    }
 }

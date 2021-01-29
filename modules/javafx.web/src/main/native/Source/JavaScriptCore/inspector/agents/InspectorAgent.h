@@ -47,16 +47,16 @@ class JS_EXPORT_PRIVATE InspectorAgent final : public InspectorAgentBase, public
     WTF_MAKE_FAST_ALLOCATED;
 public:
     InspectorAgent(AgentContext&);
-    virtual ~InspectorAgent();
+    ~InspectorAgent() final;
 
     // InspectorAgentBase
-    void didCreateFrontendAndBackend(FrontendRouter*, BackendDispatcher*);
-    void willDestroyFrontendAndBackend(DisconnectReason);
+    void didCreateFrontendAndBackend(FrontendRouter*, BackendDispatcher*) final;
+    void willDestroyFrontendAndBackend(DisconnectReason) final;
 
     // InspectorBackendDispatcherHandler
-    void enable(ErrorString&);
-    void disable(ErrorString&);
-    void initialized(ErrorString&);
+    void enable(ErrorString&) final;
+    void disable(ErrorString&) final;
+    void initialized(ErrorString&) final;
 
     // CommandLineAPI
     void inspect(RefPtr<Protocol::Runtime::RemoteObject>&& objectToInspect, RefPtr<JSON::Object>&& hints);

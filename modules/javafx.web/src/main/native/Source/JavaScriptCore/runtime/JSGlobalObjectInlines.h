@@ -27,7 +27,10 @@
 
 #include "JSGlobalObject.h"
 
+#include "ArrayConstructor.h"
 #include "ArrayPrototype.h"
+#include "JSFunction.h"
+#include "LinkTimeConstant.h"
 #include "ObjectPrototype.h"
 
 namespace JSC {
@@ -94,6 +97,27 @@ ALWAYS_INLINE bool JSGlobalObject::isMapPrototypeSetFastAndNonObservable()
 ALWAYS_INLINE bool JSGlobalObject::isSetPrototypeAddFastAndNonObservable()
 {
     return setAddWatchpointSet().isStillValid();
+}
+
+ALWAYS_INLINE Structure* JSGlobalObject::arrayStructureForIndexingTypeDuringAllocation(JSGlobalObject* globalObject, IndexingType indexingType, JSValue newTarget) const
+{
+    return !newTarget || newTarget == globalObject->arrayConstructor()
+        ? globalObject->arrayStructureForIndexingTypeDuringAllocation(indexingType)
+        : InternalFunction::createSubclassStructure(globalObject, asObject(newTarget), getFunctionRealm(globalObject->vm(), asObject(newTarget))->arrayStructureForIndexingTypeDuringAllocation(indexingType));
+}
+
+inline JSFunction* JSGlobalObject::throwTypeErrorFunction() const { return jsCast<JSFunction*>(linkTimeConstant(LinkTimeConstant::throwTypeErrorFunction)); }
+inline JSFunction* JSGlobalObject::newPromiseCapabilityFunction() const { return jsCast<JSFunction*>(linkTimeConstant(LinkTimeConstant::newPromiseCapability)); }
+inline JSFunction* JSGlobalObject::resolvePromiseFunction() const { return jsCast<JSFunction*>(linkTimeConstant(LinkTimeConstant::resolvePromise)); }
+inline JSFunction* JSGlobalObject::rejectPromiseFunction() const { return jsCast<JSFunction*>(linkTimeConstant(LinkTimeConstant::rejectPromise)); }
+inline JSFunction* JSGlobalObject::promiseProtoThenFunction() const { return jsCast<JSFunction*>(linkTimeConstant(LinkTimeConstant::defaultPromiseThen)); }
+inline JSFunction* JSGlobalObject::regExpProtoExecFunction() const { return jsCast<JSFunction*>(linkTimeConstant(LinkTimeConstant::regExpBuiltinExec)); }
+inline GetterSetter* JSGlobalObject::regExpProtoGlobalGetter() const { return bitwise_cast<GetterSetter*>(linkTimeConstant(LinkTimeConstant::regExpProtoGlobalGetter)); }
+inline GetterSetter* JSGlobalObject::regExpProtoUnicodeGetter() const { return bitwise_cast<GetterSetter*>(linkTimeConstant(LinkTimeConstant::regExpProtoUnicodeGetter)); }
+
+ALWAYS_INLINE VM& getVM(JSGlobalObject* globalObject)
+{
+    return globalObject->vm();
 }
 
 } // namespace JSC

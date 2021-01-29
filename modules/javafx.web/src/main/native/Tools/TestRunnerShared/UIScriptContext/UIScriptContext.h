@@ -61,9 +61,10 @@ typedef enum  {
     CallbackTypeDidEndScrolling,
     CallbackTypeDidStartFormControlInteraction,
     CallbackTypeDidEndFormControlInteraction,
-    CallbackTypeDidShowForcePressPreview,
-    CallbackTypeDidDismissForcePressPreview,
+    CallbackTypeDidShowContextMenu,
+    CallbackTypeDidDismissContextMenu,
     CallbackTypeWillCreateNewPage,
+    CallbackTypeWindowTapRecognized,
     CallbackTypeNonPersistent = firstNonPersistentCallbackID
 } CallbackType;
 

@@ -400,7 +400,7 @@ Optional<LayoutRect> RenderTableCell::computeVisibleRectInContainer(const Layout
     if (container == this)
         return rect;
     LayoutRect adjustedRect = rect;
-    if ((!view().frameView().layoutContext().isPaintOffsetCacheEnabled() || container || context.m_options.contains(VisibleRectContextOption::UseEdgeInclusiveIntersection)) && parent())
+    if ((!view().frameView().layoutContext().isPaintOffsetCacheEnabled() || container || context.options.contains(VisibleRectContextOption::UseEdgeInclusiveIntersection)) && parent())
         adjustedRect.moveBy(-parentBox()->location()); // Rows are in the same coordinate space, so don't add their offset in.
     return RenderBlockFlow::computeVisibleRectInContainer(adjustedRect, container, context);
 }
@@ -1318,12 +1318,12 @@ void RenderTableCell::paintBoxDecorations(PaintInfo& paintInfo, const LayoutPoin
     LayoutRect paintRect = LayoutRect(paintOffset, frameRect().size());
     adjustBorderBoxRectForPainting(paintRect);
 
-    paintBoxShadow(paintInfo, paintRect, style(), Normal);
+    paintBoxShadow(paintInfo, paintRect, style(), ShadowStyle::Normal);
 
     // Paint our cell background.
     paintBackgroundsBehindCell(paintInfo, paintOffset, this);
 
-    paintBoxShadow(paintInfo, paintRect, style(), Inset);
+    paintBoxShadow(paintInfo, paintRect, style(), ShadowStyle::Inset);
 
     if (!style().hasBorder() || table->collapseBorders())
         return;

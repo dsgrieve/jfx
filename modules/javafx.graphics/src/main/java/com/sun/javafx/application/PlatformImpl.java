@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2010, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -31,8 +31,10 @@ import com.sun.javafx.css.StyleManager;
 import com.sun.javafx.tk.TKListener;
 import com.sun.javafx.tk.TKStage;
 import com.sun.javafx.tk.Toolkit;
+import com.sun.javafx.util.Logging;
 import com.sun.javafx.util.ModuleHelper;
 
+import java.lang.module.ModuleDescriptor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.security.AccessControlContext;
@@ -185,6 +187,23 @@ public class PlatformImpl {
             // If we've already initialized, just put the runnable on the queue.
             runLater(r);
             return;
+        }
+
+        final Module module = PlatformImpl.class.getModule();
+        final ModuleDescriptor moduleDesc = module.getDescriptor();
+        if (!module.isNamed()
+                || !"javafx.graphics".equals(module.getName())
+                || moduleDesc == null
+                || moduleDesc.isAutomatic()
+                || moduleDesc.isOpen()) {
+
+            String warningStr = "Unsupported JavaFX configuration: "
+                + "classes were loaded from '" + module + "'";
+            if (moduleDesc != null) {
+                warningStr += ", isAutomatic: " + moduleDesc.isAutomatic();
+                warningStr += ", isOpen: " + moduleDesc.isOpen();
+            }
+            Logging.getJavaFXLogger().warning(warningStr);
         }
 
         AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
@@ -787,6 +806,9 @@ public class PlatformImpl {
                 if (PlatformUtil.isAndroid()) {
                     uaStylesheets.add("com/sun/javafx/scene/control/skin/caspian/android.css");
                 }
+                if (PlatformUtil.isIOS()) {
+                    uaStylesheets.add("com/sun/javafx/scene/control/skin/caspian/ios.css");
+                }
             }
 
             if (isSupported(ConditionalFeature.TWO_LEVEL_FOCUS)) {
@@ -815,6 +837,9 @@ public class PlatformImpl {
             }
             if (PlatformUtil.isAndroid()) {
                 uaStylesheets.add("com/sun/javafx/scene/control/skin/modena/android.css");
+            }
+            if (PlatformUtil.isIOS()) {
+                uaStylesheets.add("com/sun/javafx/scene/control/skin/modena/ios.css");
             }
 
             if (isSupported(ConditionalFeature.TWO_LEVEL_FOCUS)) {

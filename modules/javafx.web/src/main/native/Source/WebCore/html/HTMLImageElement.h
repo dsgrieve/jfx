@@ -28,23 +28,29 @@
 #include "GraphicsLayer.h"
 #include "GraphicsTypes.h"
 #include "HTMLElement.h"
-#include "HTMLImageLoader.h"
+#include "MediaQueryEvaluator.h"
+#include <wtf/WeakPtr.h>
 
 namespace WebCore {
 
+class CachedImage;
+class DeferredPromise;
 class EditableImageReference;
 class HTMLAttachmentElement;
 class HTMLFormElement;
+class HTMLImageLoader;
 class HTMLMapElement;
 
 struct ImageCandidate;
+
+enum class RelevantMutation : bool;
 
 class HTMLImageElement : public HTMLElement, public FormNamedItem {
     WTF_MAKE_ISO_ALLOCATED(HTMLImageElement);
     friend class HTMLFormElement;
 public:
     static Ref<HTMLImageElement> create(Document&);
-    static Ref<HTMLImageElement> create(const QualifiedName&, Document&, HTMLFormElement*);
+    static Ref<HTMLImageElement> create(const QualifiedName&, Document&, HTMLFormElement* = nullptr);
     static Ref<HTMLImageElement> createForJSConstructor(Document&, Optional<unsigned> width, Optional<unsigned> height);
 
     virtual ~HTMLImageElement();
@@ -65,9 +71,9 @@ public:
 
     CompositeOperator compositeOperator() const { return m_compositeOperator; }
 
-    CachedImage* cachedImage() const { return m_imageLoader.image(); }
+    WEBCORE_EXPORT CachedImage* cachedImage() const;
 
-    void setLoadManually(bool loadManually) { m_imageLoader.setLoadManually(loadManually); }
+    void setLoadManually(bool);
 
     bool matchesUsemap(const AtomStringImpl&) const;
     HTMLMapElement* associatedMapElement() const;
@@ -103,8 +109,8 @@ public:
     const String& attachmentIdentifier() const;
 #endif
 
-    bool hasPendingActivity() const { return m_imageLoader.hasPendingActivity(); }
-    size_t pendingDecodePromisesCountForTesting() const { return m_imageLoader.pendingDecodePromisesCountForTesting(); }
+    bool hasPendingActivity() const;
+    WEBCORE_EXPORT size_t pendingDecodePromisesCountForTesting() const;
 
     bool canContainRangeEndPoint() const override { return false; }
 
@@ -124,12 +130,32 @@ public:
 
     void defaultEventHandler(Event&) final;
 
+    void loadDeferredImage();
+
+    const AtomString& loadingForBindings() const;
+    void setLoadingForBindings(const AtomString&);
+
+    bool isLazyLoadable() const;
+    static bool hasLazyLoadableAttributeValue(const AtomString&);
+
+    bool isDeferred() const;
+
+    bool isDroppedImagePlaceholder() const { return m_isDroppedImagePlaceholder; }
+    void setIsDroppedImagePlaceholder() { m_isDroppedImagePlaceholder = true; }
+
+    void evaluateDynamicMediaQueryDependencies();
+
+    void setReferrerPolicyForBindings(const AtomString&);
+    String referrerPolicyForBindings() const;
+    ReferrerPolicy referrerPolicy() const;
+
 protected:
-    HTMLImageElement(const QualifiedName&, Document&, HTMLFormElement* = 0);
+    HTMLImageElement(const QualifiedName&, Document&, HTMLFormElement* = nullptr);
 
     void didMoveToNewDocument(Document& oldDocument, Document& newDocument) override;
 
 private:
+    void attributeChanged(const QualifiedName&, const AtomString& oldValue, const AtomString& newValue, AttributeModificationReason) final;
     void parseAttribute(const QualifiedName&, const AtomString&) override;
     bool isPresentationAttribute(const QualifiedName&) const override;
     void collectStyleForPresentationAttribute(const QualifiedName&, const AtomString&, MutableStyleProperties&) override;
@@ -159,13 +185,15 @@ private:
 
     bool isInteractiveContent() const final;
 
-    void selectImageSource();
+    void selectImageSource(RelevantMutation);
 
     ImageCandidate bestFitSourceFromPictureElement();
 
     void updateEditableImage();
 
     void copyNonAttributePropertiesFromElement(const Element&) final;
+
+    float effectiveImageDevicePixelRatio() const;
 
 #if ENABLE(SERVICE_CONTROLS)
     void updateImageControls();
@@ -175,7 +203,7 @@ private:
     bool childShouldCreateRenderer(const Node&) const override;
 #endif
 
-    HTMLImageLoader m_imageLoader;
+    std::unique_ptr<HTMLImageLoader> m_imageLoader;
     WeakPtr<HTMLFormElement> m_form;
     WeakPtr<HTMLFormElement> m_formSetByParser;
 
@@ -186,9 +214,11 @@ private:
     float m_imageDevicePixelRatio;
     bool m_experimentalImageMenuEnabled;
     bool m_hadNameBeforeAttributeChanged { false }; // FIXME: We only need this because parseAttribute() can't see the old value.
+    bool m_isDroppedImagePlaceholder { false };
 
     RefPtr<EditableImageReference> m_editableImage;
     WeakPtr<HTMLPictureElement> m_pictureElement;
+    MediaQueryDynamicResults m_mediaQueryDynamicResults;
 
 #if ENABLE(ATTACHMENT_ELEMENT)
     String m_pendingClonedAttachmentID;

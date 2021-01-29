@@ -35,26 +35,11 @@
 
 namespace WebCore {
 
-static inline Ref<Blob> blobFromData(PAL::SessionID sessionID, const unsigned char* data, unsigned length, const String& contentType)
+static inline Ref<Blob> blobFromData(const unsigned char* data, unsigned length, const String& contentType)
 {
     Vector<uint8_t> value(length);
     memcpy(value.data(), data, length);
-    return Blob::create(sessionID, WTFMove(value), contentType);
-}
-
-static inline bool shouldPrependBOM(const unsigned char* data, unsigned length)
-{
-    if (length < 3)
-        return true;
-    return data[0] != 0xef || data[1] != 0xbb || data[2] != 0xbf;
-}
-
-static String textFromUTF8(const unsigned char* data, unsigned length)
-{
-    auto decoder = TextResourceDecoder::create("text/plain", "UTF-8");
-    if (shouldPrependBOM(data, length))
-        decoder->decode("\xef\xbb\xbf", 3);
-    return decoder->decodeAndFlush(reinterpret_cast<const char*>(data), length);
+    return Blob::create(WTFMove(value), contentType);
 }
 
 static void resolveWithTypeAndData(Ref<DeferredPromise>&& promise, FetchBodyConsumer::Type type, const String& contentType, const unsigned char* data, unsigned length)
@@ -64,15 +49,15 @@ static void resolveWithTypeAndData(Ref<DeferredPromise>&& promise, FetchBodyCons
         fulfillPromiseWithArrayBuffer(WTFMove(promise), data, length);
         return;
     case FetchBodyConsumer::Type::Blob:
-        promise->resolveCallbackValueWithNewlyCreated<IDLInterface<Blob>>([&data, &length, &contentType](auto& context) {
-            return blobFromData(context.sessionID(), data, length, contentType);
+        promise->resolveCallbackValueWithNewlyCreated<IDLInterface<Blob>>([&data, &length, &contentType](auto&) {
+            return blobFromData(data, length, contentType);
         });
         return;
     case FetchBodyConsumer::Type::JSON:
-        fulfillPromiseWithJSON(WTFMove(promise), textFromUTF8(data, length));
+        fulfillPromiseWithJSON(WTFMove(promise), TextResourceDecoder::textFromUTF8(data, length));
         return;
     case FetchBodyConsumer::Type::Text:
-        promise->resolve<IDLDOMString>(textFromUTF8(data, length));
+        promise->resolve<IDLDOMString>(TextResourceDecoder::textFromUTF8(data, length));
         return;
     case FetchBodyConsumer::Type::None:
         ASSERT_NOT_REACHED();
@@ -83,7 +68,7 @@ static void resolveWithTypeAndData(Ref<DeferredPromise>&& promise, FetchBodyCons
 void FetchBodyConsumer::clean()
 {
     m_buffer = nullptr;
-    m_consumePromise = nullptr;
+    resetConsumePromise();
     if (m_sink) {
         m_sink->clearCallback();
         return;
@@ -122,7 +107,7 @@ void FetchBodyConsumer::resolve(Ref<DeferredPromise>&& promise, ReadableStream* 
     }
 
     if (m_isLoading) {
-        m_consumePromise = WTFMove(promise);
+        setConsumePromise(WTFMove(promise));
         return;
     }
 
@@ -132,8 +117,8 @@ void FetchBodyConsumer::resolve(Ref<DeferredPromise>&& promise, ReadableStream* 
         fulfillPromiseWithArrayBuffer(WTFMove(promise), takeAsArrayBuffer().get());
         return;
     case Type::Blob:
-        promise->resolveCallbackValueWithNewlyCreated<IDLInterface<Blob>>([this](auto& context) {
-            return takeAsBlob(context.sessionID());
+        promise->resolveCallbackValueWithNewlyCreated<IDLInterface<Blob>>([this](auto&) {
+            return takeAsBlob();
         });
         return;
     case Type::JSON:
@@ -181,13 +166,13 @@ RefPtr<JSC::ArrayBuffer> FetchBodyConsumer::takeAsArrayBuffer()
     return arrayBuffer;
 }
 
-Ref<Blob> FetchBodyConsumer::takeAsBlob(PAL::SessionID sessionID)
+Ref<Blob> FetchBodyConsumer::takeAsBlob()
 {
     if (!m_buffer)
-        return Blob::create(sessionID, Vector<uint8_t>(), m_contentType);
+        return Blob::create(Vector<uint8_t>(), m_contentType);
 
     // FIXME: We should try to move m_buffer to Blob without doing extra copy.
-    return blobFromData(sessionID, reinterpret_cast<const unsigned char*>(m_buffer->data()), m_buffer->size(), m_contentType);
+    return blobFromData(reinterpret_cast<const unsigned char*>(m_buffer->data()), m_buffer->size(), m_contentType);
 }
 
 String FetchBodyConsumer::takeAsText()
@@ -196,7 +181,7 @@ String FetchBodyConsumer::takeAsText()
     if (!m_buffer)
         return String();
 
-    auto text = textFromUTF8(reinterpret_cast<const unsigned char*>(m_buffer->data()), m_buffer->size());
+    auto text = TextResourceDecoder::textFromUTF8(reinterpret_cast<const unsigned char*>(m_buffer->data()), m_buffer->size());
     m_buffer = nullptr;
     return text;
 }
@@ -204,7 +189,14 @@ String FetchBodyConsumer::takeAsText()
 void FetchBodyConsumer::setConsumePromise(Ref<DeferredPromise>&& promise)
 {
     ASSERT(!m_consumePromise);
+    m_userGestureToken = UserGestureIndicator::currentUserGesture();
     m_consumePromise = WTFMove(promise);
+}
+
+void FetchBodyConsumer::resetConsumePromise()
+{
+    m_consumePromise = nullptr;
+    m_userGestureToken = nullptr;
 }
 
 void FetchBodyConsumer::setSource(Ref<FetchBodySource>&& source)
@@ -221,7 +213,7 @@ void FetchBodyConsumer::loadingFailed(const Exception& exception)
     m_isLoading = false;
     if (m_consumePromise) {
         m_consumePromise->reject(exception);
-        m_consumePromise = nullptr;
+        resetConsumePromise();
     }
     if (m_source) {
         m_source->error(exception);
@@ -233,8 +225,14 @@ void FetchBodyConsumer::loadingSucceeded()
 {
     m_isLoading = false;
 
-    if (m_consumePromise)
-        resolve(m_consumePromise.releaseNonNull(), nullptr);
+    if (m_consumePromise) {
+        if (!m_userGestureToken || m_userGestureToken->hasExpired(UserGestureToken::maximumIntervalForUserGestureForwardingForFetch()) || !m_userGestureToken->processingUserGesture())
+            resolve(m_consumePromise.releaseNonNull(), nullptr);
+        else {
+            UserGestureIndicator gestureIndicator(m_userGestureToken, UserGestureToken::GestureScope::MediaOnly, UserGestureToken::IsPropagatedFromFetch::Yes);
+            resolve(m_consumePromise.releaseNonNull(), nullptr);
+        }
+    }
     if (m_source) {
         m_source->close();
         m_source = nullptr;

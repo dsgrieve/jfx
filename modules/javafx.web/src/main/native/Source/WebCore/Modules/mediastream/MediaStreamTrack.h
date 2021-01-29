@@ -32,12 +32,11 @@
 #include "ActiveDOMObject.h"
 #include "DoubleRange.h"
 #include "EventTarget.h"
-#include "GenericTaskQueue.h"
-#include "JSDOMPromiseDeferred.h"
 #include "LongRange.h"
 #include "MediaProducer.h"
 #include "MediaStreamTrackPrivate.h"
 #include "MediaTrackConstraints.h"
+#include "PlatformMediaSession.h"
 #include <wtf/LoggerHelper.h>
 
 namespace WebCore {
@@ -47,12 +46,14 @@ class Document;
 
 struct MediaTrackConstraints;
 
+template<typename IDLType> class DOMPromiseDeferred;
+
 class MediaStreamTrack
     : public RefCounted<MediaStreamTrack>
     , public ActiveDOMObject
     , public EventTargetWithInlineData
-    , public MediaProducer
     , private MediaStreamTrackPrivate::Observer
+    , private PlatformMediaSession::AudioCaptureSource
 #if !RELEASE_LOG_DISABLED
     , private LoggerHelper
 #endif
@@ -70,10 +71,8 @@ public:
 
     static void endCapture(Document&);
 
-#if PLATFORM(IOS_FAMILY)
-    static MediaProducer::MediaStateFlags captureState();
-    static void muteCapture();
-#endif
+    static MediaProducer::MediaStateFlags captureState(Document&);
+    static void updateCaptureAccordingToMutedState(Document&);
 
     virtual bool isCanvas() const { return false; }
 
@@ -88,7 +87,6 @@ public:
     void setEnabled(bool);
 
     bool muted() const;
-    void setMuted(MediaProducer::MutedStateFlags);
 
     enum class State { Live, Ended };
     State readyState() const;
@@ -142,9 +140,7 @@ public:
 
     AudioSourceProvider* audioSourceProvider();
 
-    // MediaProducer
-    void pageMutedStateDidChange() final;
-    MediaProducer::MediaStateFlags mediaState() const final;
+    MediaProducer::MediaStateFlags mediaState() const;
 
     void addObserver(Observer&);
     void removeObserver(Observer&);
@@ -152,10 +148,9 @@ public:
     using RefCounted::ref;
     using RefCounted::deref;
 
-    // ActiveDOMObject API.
-    bool hasPendingActivity() const final;
-
     void setIdForTesting(String&& id) { m_private->setIdForTesting(WTFMove(id)); }
+
+    Document* document() const;
 
 #if !RELEASE_LOG_DISABLED
     const Logger& logger() const final { return m_private->logger(); }
@@ -173,13 +168,13 @@ private:
     explicit MediaStreamTrack(MediaStreamTrack&);
 
     void configureTrackRendering();
-
-    Document* document() const;
+    void updateToPageMutedState();
 
     // ActiveDOMObject API.
-    void stop() final;
-    const char* activeDOMObjectName() const final;
-    bool canSuspendForDocumentSuspension() const final;
+    void stop() final { stopTrack(); }
+    const char* activeDOMObjectName() const override;
+    void suspend(ReasonForSuspension) final;
+    bool virtualHasPendingActivity() const final;
 
     // EventTarget
     void refEventTarget() final { ref(); }
@@ -193,6 +188,9 @@ private:
     void trackSettingsChanged(MediaStreamTrackPrivate&) final;
     void trackEnabledChanged(MediaStreamTrackPrivate&) final;
 
+    // PlatformMediaSession::AudioCaptureSource
+    bool isCapturingAudio() const final;
+
 #if !RELEASE_LOG_DISABLED
     const char* logClassName() const final { return "MediaStreamTrack"; }
     WTFLogChannel& logChannel() const final;
@@ -201,9 +199,7 @@ private:
     Vector<Observer*> m_observers;
 
     MediaTrackConstraints m_constraints;
-    Optional<DOMPromiseDeferred<void>> m_promise;
-    GenericTaskQueue<ScriptExecutionContext> m_taskQueue;
-    GenericTaskQueue<Timer> m_eventTaskQueue;
+    std::unique_ptr<DOMPromiseDeferred<void>> m_promise;
 
     bool m_ended { false };
     const bool m_isCaptureTrack { false };

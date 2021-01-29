@@ -55,9 +55,14 @@ public:
         WebGLDrawBuffersName,
         OESElementIndexUintName,
         WebGLCompressedTextureATCName,
+        WebGLCompressedTextureETCName,
+        WebGLCompressedTextureETC1Name,
         WebGLCompressedTexturePVRTCName,
         WebGLCompressedTextureASTCName,
         ANGLEInstancedArraysName,
+        EXTColorBufferHalfFloatName,
+        WebGLColorBufferFloatName,
+        EXTColorBufferFloatName,
     };
 
     void ref() { m_context.ref(); }

@@ -59,8 +59,11 @@ interface UIScriptController {
     void liftUpAtPoint(long x, long y, long touchCount, object callback);
     void singleTapAtPoint(long x, long y, object callback);
     void singleTapAtPointWithModifiers(long x, long y, object modifierArray, object callback);
+    void twoFingerSingleTapAtPoint(long x, long y, object callback);
     void doubleTapAtPoint(long x, long y, float delay, object callback);
     void dragFromPointToPoint(long startX, long startY, long endX, long endY, double durationSeconds, object callback);
+
+    void activateAtPoint(long x, long y, object callback);
 
     void longPressAtPoint(long x, long y, object callback);
 
@@ -75,6 +78,10 @@ interface UIScriptController {
 
     void keyDown(DOMString character, object modifierArray);
     void toggleCapsLock(object callback);
+    void setContinuousSpellCheckingEnabled(boolean enabled);
+    void setSpellCheckerResults(object results);
+
+    readonly attribute boolean keyboardIsAutomaticallyShifted;
 
     void rawKeyDown(DOMString key);
     void rawKeyUp(DOMString key);
@@ -200,22 +207,25 @@ interface UIScriptController {
     attribute object didStartFormControlInteractionCallback;
     attribute object didEndFormControlInteractionCallback;
 
-    // Force press preview handling
-    attribute object didShowForcePressPreviewCallback;
-    attribute object didDismissForcePressPreviewCallback;
+    // Pop Over preview handling
+    attribute object didShowContextMenuCallback;
+    attribute object didDismissContextMenuCallback;
+
+    readonly attribute boolean isShowingContextMenu;
 
     // <select> picker
     void selectFormAccessoryPickerRow(long rowIndex);
+    boolean selectFormAccessoryHasCheckedItemAtRow(long rowIndex);
     readonly attribute DOMString selectFormPopoverTitle;
     readonly attribute DOMString formInputLabel;
 
     void setTimePickerValue(long hour, long minute);
-
-    // Share sheet
-    void setShareSheetCompletesImmediatelyWithResolution(boolean resolved);
+    readonly attribute double timePickerValueHour;
+    readonly attribute double timePickerValueMinute;
 
     // <datalist>
     readonly attribute boolean isShowingDataListSuggestions;
+    void activateDataListSuggestion(unsigned long index, object callback);
 
     void keyboardAccessoryBarNext();
     void keyboardAccessoryBarPrevious();
@@ -231,12 +241,16 @@ interface UIScriptController {
     readonly attribute boolean isShowingKeyboard;
     readonly attribute boolean hasInputSession;
 
+    attribute boolean windowIsKey;
+
     attribute object didShowMenuCallback;
     attribute object didHideMenuCallback;
     readonly attribute boolean isDismissingMenu;
     readonly attribute boolean isShowingMenu;
     readonly attribute object menuRect;
     object rectForMenuAction(DOMString action);
+    void chooseMenuAction(DOMString action, object callback);
+    void dismissMenu();
 
     readonly attribute boolean isShowingPopover;
     attribute object willPresentPopoverCallback;
@@ -256,6 +270,9 @@ interface UIScriptController {
     void becomeFirstResponder();
     void resignFirstResponder();
     readonly attribute boolean isPresentingModally;
+
+    void copyText(DOMString text);
+    void paste();
 
     readonly attribute double contentOffsetX;
     readonly attribute double contentOffsetY;
@@ -289,15 +306,16 @@ interface UIScriptController {
     readonly attribute object selectionCaretViewRect;
     readonly attribute object selectionRangeViewRects;
     readonly attribute object calendarType;
-    void setDefaultCalendarType(DOMString calendarIdentifier);
+    void setDefaultCalendarType(DOMString calendarIdentifier, DOMString localeIdentifier);
     readonly attribute object inputViewBounds;
 
     void setKeyboardInputModeIdentifier(DOMString identifier);
 
     void replaceTextAtRange(DOMString text, long location, long length);
-    void removeAllDynamicDictionaries();
 
     readonly attribute DOMString scrollingTreeAsText;
+
+    boolean mayContainEditableElementsInRect(unsigned long x, unsigned long y, unsigned long width, unsigned long height);
 
     object propertiesOfLayerWithID(unsigned long long layerID);
 
@@ -312,6 +330,8 @@ interface UIScriptController {
     // Unparent and parent the web view, simulating, for example, tab switching.
     void removeViewFromWindow(object callback);
     void addViewToWindow(object callback);
+
+    void installTapGestureOnWindow(object callback);
 
     void overridePreference(DOMString preference, DOMString value);
 

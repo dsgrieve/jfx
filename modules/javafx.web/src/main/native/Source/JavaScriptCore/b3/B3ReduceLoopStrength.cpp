@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Apple Inc. All rights reserved.
+ * Copyright (C) 2019-2020 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -31,16 +31,11 @@
 #include "B3BasicBlockInlines.h"
 #include "B3BlockInsertionSet.h"
 #include "B3ConstPtrValue.h"
-#include "B3EnsureLoopPreHeaders.h"
 #include "B3InsertionSet.h"
 #include "B3NaturalLoops.h"
 #include "B3PhaseScope.h"
 #include "B3ProcedureInlines.h"
 #include "B3ValueInlines.h"
-#include "B3Variable.h"
-#include "B3VariableValue.h"
-#include <wtf/GraphNodeWorklist.h>
-#include <wtf/IndexSet.h>
 #include <wtf/SmallPtrSet.h>
 #include <wtf/Vector.h>
 
@@ -145,7 +140,7 @@ void fastForwardCopy32(uint32_t* dst, const uint32_t* src, size_t size)
 #endif
 
 class ReduceLoopStrength {
-    static const bool verbose = false;
+    static constexpr bool verbose = false;
 
     struct AddrInfo {
         Value* appendAddr(Procedure& proc, BasicBlock* block, Value* addr)
@@ -437,14 +432,14 @@ public:
         BasicBlock* memcpy = m_blockInsertionSet.insertBefore(loopPostfooter, loopPostfooter->frequency());
         memcpy->setSuccessors(FrequentedBlock(loopPostfooter));
         memcpy->addPredecessor(loopPreheader);
-        for (BasicBlock* pred : loopPostfooter->predecessors())
-            loopPostfooter->removePredecessor(pred);
+        while (loopPostfooter->predecessors().size())
+            loopPostfooter->removePredecessor(loopPostfooter->predecessors()[0]);
         loopPostfooter->addPredecessor(memcpy);
         loopPreheader->setSuccessors(memcpy);
 
         Effects effects = Effects::forCall();
         memcpy->appendNew<CCallValue>(m_proc, B3::Void, origin, effects,
-            memcpy->appendNew<ConstPtrValue>(m_proc, origin, tagCFunctionPtr<void*>(fastForwardCopy32, B3CCallPtrTag)),
+            memcpy->appendNew<ConstPtrValue>(m_proc, origin, tagCFunction<B3CCallPtrTag>(fastForwardCopy32)),
             destination->appendAddr(m_proc, memcpy, destination->arrayBase),
             source->appendAddr(m_proc, memcpy, source->arrayBase),
             loopBound);

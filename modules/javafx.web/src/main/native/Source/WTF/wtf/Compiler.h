@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011, 2012, 2014 Apple Inc. All rights reserved.
+ * Copyright (C) 2011-2020 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -204,8 +204,11 @@
 
 #elif !defined(FALLTHROUGH) && !defined(__cplusplus)
 
-#if COMPILER(GCC)
+#if COMPILER(GCC_COMPATIBLE) && defined(__has_attribute)
+// Break out this #if to satisy some versions Windows compilers.
+#if __has_attribute(fallthrough)
 #define FALLTHROUGH __attribute__ ((fallthrough))
+#endif
 #endif
 
 #endif // !defined(FALLTHROUGH) && defined(__cplusplus) && defined(__has_cpp_attribute)
@@ -252,6 +255,9 @@
 #define NO_RETURN
 #endif
 
+#if !defined(__has_attribute)
+#define __has_attribute(feature) 0
+#endif
 /* NOT_TAIL_CALLED */
 
 #if !defined(NOT_TAIL_CALLED) && defined(__has_attribute)
@@ -313,6 +319,16 @@
 
 #if !defined(PURE_FUNCTION)
 #define PURE_FUNCTION
+#endif
+
+/* WK_UNUSED_INSTANCE_VARIABLE */
+
+#if !defined(WK_UNUSED_INSTANCE_VARIABLE) && COMPILER(GCC_COMPATIBLE)
+#define WK_UNUSED_INSTANCE_VARIABLE __attribute__((unused))
+#endif
+
+#if !defined(WK_UNUSED_INSTANCE_VARIABLE)
+#define WK_UNUSED_INSTANCE_VARIABLE
 #endif
 
 /* UNUSED_FUNCTION */
@@ -377,6 +393,17 @@
 
 #if !defined(WARN_UNUSED_RETURN)
 #define WARN_UNUSED_RETURN
+#endif
+
+/* DEBUGGER_ANNOTATION_MARKER */
+
+#if !defined(DEBUGGER_ANNOTATION_MARKER) && COMPILER(GCC)
+#define DEBUGGER_ANNOTATION_MARKER(name) \
+    __attribute__((__no_reorder__)) void name(void) { __asm__(""); }
+#endif
+
+#if !defined(DEBUGGER_ANNOTATION_MARKER)
+#define DEBUGGER_ANNOTATION_MARKER(name)
 #endif
 
 #if !defined(__has_include) && COMPILER(MSVC)

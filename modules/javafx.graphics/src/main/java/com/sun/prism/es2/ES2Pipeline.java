@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2009, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -52,17 +52,10 @@ public class ES2Pipeline extends GraphicsPipeline {
             String libName = "prism_es2";
 
             String eglType = PlatformUtil.getEmbeddedType();
-            if ("eglfb".equals(eglType)) {
-                isEglfb = true;
-                libName = "prism_es2_eglfb";
-            }
-            else if ("monocle".equals(eglType)) {
+            if ("monocle".equals(eglType)) {
                 isEglfb = true;
                 libName = "prism_es2_monocle";
             }
-            else if ("eglx11".equals(eglType))
-                libName = "prism_es2_eglx11";
-
             if (PrismSettings.verbose) {
                 System.out.println("Loading ES2 native library ... " + libName);
             }

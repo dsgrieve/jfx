@@ -35,6 +35,7 @@
 #include "ImageTypes.h"
 #include "NativeImage.h"
 #include "Timer.h"
+#include <wtf/EnumTraits.h>
 #include <wtf/Optional.h>
 #include <wtf/RefCounted.h>
 #include <wtf/RefPtr.h>
@@ -58,6 +59,9 @@ typedef struct HBITMAP__ *HBITMAP;
 
 #if PLATFORM(GTK)
 typedef struct _GdkPixbuf GdkPixbuf;
+#if USE(GTK4)
+typedef struct _GdkTexture GdkTexture;
+#endif
 #endif
 
 namespace WebCore {
@@ -111,11 +115,12 @@ public:
     virtual bool hasRelativeHeight() const { return false; }
     virtual void computeIntrinsicDimensions(Length& intrinsicWidth, Length& intrinsicHeight, FloatSize& intrinsicRatio);
 
-    virtual FloatSize size() const = 0;
+    virtual FloatSize size(ImageOrientation = ImageOrientation::FromImage) const = 0;
     FloatRect rect() const { return FloatRect(FloatPoint(), size()); }
     float width() const { return size().width(); }
     float height() const { return size().height(); }
     virtual Optional<IntPoint> hotSpot() const { return WTF::nullopt; }
+    virtual ImageOrientation orientation() const { return ImageOrientation::FromImage; }
 
     WEBCORE_EXPORT EncodedDataStatus setData(RefPtr<SharedBuffer>&& data, bool allDataReceived);
     virtual EncodedDataStatus dataChanged(bool /*allDataReceived*/) { return EncodedDataStatus::Unknown; }
@@ -147,8 +152,9 @@ public:
     enum TileRule { StretchTile, RoundTile, SpaceTile, RepeatTile };
 
     virtual NativeImagePtr nativeImage(const GraphicsContext* = nullptr) { return nullptr; }
-    virtual NativeImagePtr nativeImageOfSize(const IntSize&, const GraphicsContext* = nullptr) { return nullptr; }
     virtual NativeImagePtr nativeImageForCurrentFrame(const GraphicsContext* = nullptr) { return nullptr; }
+    virtual NativeImagePtr nativeImageForCurrentFrameRespectingOrientation(const GraphicsContext* = nullptr) { return nullptr; }
+    virtual NativeImagePtr nativeImageOfSize(const IntSize&, const GraphicsContext* = nullptr) { return nullptr; }
 
     // Accessors for native image formats.
 
@@ -168,6 +174,9 @@ public:
 
 #if PLATFORM(GTK)
     virtual GdkPixbuf* getGdkPixbuf() { return nullptr; }
+#if USE(GTK4)
+    virtual GdkTexture* gdkTexture() { return nullptr; }
+#endif
 #endif
 
 #if PLATFORM(JAVA)
@@ -177,7 +186,7 @@ public:
 
     virtual void drawPattern(GraphicsContext&, const FloatRect& destRect, const FloatRect& srcRect, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, const ImagePaintingOptions& = { });
 
-#if !ASSERT_DISABLED
+#if ASSERT_ENABLED
     virtual bool notSolidColor() { return true; }
 #endif
 
@@ -204,6 +213,11 @@ private:
     std::unique_ptr<Timer> m_animationStartTimer;
 };
 
+class ImageHandle {
+public:
+    RefPtr<Image> image;
+};
+
 WTF::TextStream& operator<<(WTF::TextStream&, const Image&);
 
 } // namespace WebCore
@@ -213,3 +227,17 @@ SPECIALIZE_TYPE_TRAITS_BEGIN(WebCore::ToClassName) \
     static bool isType(const WebCore::Image& image) { return image.is##ToClassName(); } \
 SPECIALIZE_TYPE_TRAITS_END()
 
+
+namespace WTF {
+
+template<> struct EnumTraits<WebCore::Image::TileRule> {
+    using values = EnumValues<
+        WebCore::Image::TileRule,
+        WebCore::Image::TileRule::StretchTile,
+        WebCore::Image::TileRule::RoundTile,
+        WebCore::Image::TileRule::SpaceTile,
+        WebCore::Image::TileRule::RepeatTile
+    >;
+};
+
+} // namespace WTF

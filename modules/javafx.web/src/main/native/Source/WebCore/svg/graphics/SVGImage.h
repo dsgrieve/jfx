@@ -48,7 +48,7 @@ public:
     FrameView* frameView() const;
 
     bool isSVGImage() const final { return true; }
-    FloatSize size() const final { return m_intrinsicSize; }
+    FloatSize size(ImageOrientation = ImageOrientation::FromImage) const final { return m_intrinsicSize; }
 
     bool hasSingleSecurityOrigin() const final;
 
@@ -68,6 +68,8 @@ public:
 #if USE(DIRECT2D)
     NativeImagePtr nativeImage(const GraphicsContext* = nullptr) final;
 #endif
+
+    Page* internalPage() { return m_page.get(); }
 
 private:
     friend class SVGImageChromeClient;

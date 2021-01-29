@@ -30,15 +30,14 @@
 #include "DisplayRefreshMonitor.h"
 #include "DocumentStorageAccess.h"
 #include "FocusDirection.h"
-#include "FrameIdentifier.h"
 #include "FrameLoader.h"
 #include "GraphicsContext.h"
 #include "GraphicsLayer.h"
 #include "HTMLMediaElementEnums.h"
 #include "HostWindow.h"
 #include "Icon.h"
+#include "ImageBuffer.h"
 #include "InputMode.h"
-#include "LayerFlushThrottleState.h"
 #include "MediaProducer.h"
 #include "PopupMenu.h"
 #include "PopupMenuClient.h"
@@ -69,6 +68,11 @@ class WAKResponder;
 #endif
 #endif
 
+#if ENABLE(MEDIA_USAGE)
+#include "MediaSessionIdentifier.h"
+#include "MediaUsageInfo.h"
+#endif
+
 OBJC_CLASS NSResponder;
 
 namespace WebCore {
@@ -85,7 +89,6 @@ class FileChooser;
 class FileIconLoader;
 class FloatRect;
 class Frame;
-class FrameLoadRequest;
 class Geolocation;
 class GraphicsLayer;
 class GraphicsLayerFactory;
@@ -111,6 +114,7 @@ class MediaPlayerRequestInstallMissingPluginsCallback;
 struct ContentRuleListResults;
 struct DateTimeChooserParameters;
 struct GraphicsDeviceAdapter;
+struct MockWebAuthenticationConfiguration;
 struct ShareDataWithParsedURL;
 struct ViewportArguments;
 struct WindowFeatures;
@@ -139,9 +143,8 @@ public:
     // Frame wants to create the new Page. Also, the newly created window
     // should not be shown to the user until the ChromeClient of the newly
     // created Page has its show method called.
-    // The FrameLoadRequest parameter is only for ChromeClient to check if the
-    // request could be fulfilled. The ChromeClient should not load the request.
-    virtual Page* createWindow(Frame&, const FrameLoadRequest&, const WindowFeatures&, const NavigationAction&) = 0;
+    // The ChromeClient should not load the request.
+    virtual Page* createWindow(Frame&, const WindowFeatures&, const NavigationAction&) = 0;
     virtual void show() = 0;
 
     virtual bool canRunModal() = 0;
@@ -189,10 +192,11 @@ public:
 
     virtual PlatformPageClient platformPageClient() const = 0;
 
-#if ENABLE(CURSOR_SUPPORT)
     virtual void setCursor(const Cursor&) = 0;
     virtual void setCursorHiddenUntilMouseMoves(bool) = 0;
-#endif
+    virtual bool supportsSettingCursor() { return true; }
+
+    virtual bool shouldUseMouseEventForSelection(const PlatformMouseEvent&) { return true; }
 
     virtual FloatSize screenSize() const { return const_cast<ChromeClient&>(*this).windowRect().size(); }
     virtual FloatSize availableScreenSize() const { return const_cast<ChromeClient&>(*this).windowRect().size(); }
@@ -207,9 +211,7 @@ public:
 
     virtual bool shouldUnavailablePluginMessageBeButton(RenderEmbeddedObject::PluginUnavailabilityReason) const { return false; }
     virtual void unavailablePluginButtonClicked(Element&, RenderEmbeddedObject::PluginUnavailabilityReason) const { }
-    virtual void mouseDidMoveOverElement(const HitTestResult&, unsigned modifierFlags) = 0;
-
-    virtual void setToolTip(const String&, TextDirection) = 0;
+    virtual void mouseDidMoveOverElement(const HitTestResult&, unsigned modifierFlags, const String& toolTip, TextDirection) = 0;
 
     virtual void print(Frame&) = 0;
 
@@ -270,6 +272,8 @@ public:
 
     virtual void webAppOrientationsUpdated() = 0;
     virtual void showPlaybackTargetPicker(bool hasVideo, RouteSharingPolicy, const String&) = 0;
+
+    virtual bool showDataDetectorsUIForElement(const Element&, const Event&) = 0;
 #endif
 
 #if ENABLE(ORIENTATION_EVENTS)
@@ -282,6 +286,7 @@ public:
 
 #if ENABLE(DATALIST_ELEMENT)
     virtual std::unique_ptr<DataListSuggestionPicker> createDataListSuggestionPicker(DataListSuggestionsClient&) = 0;
+    virtual bool canShowDataListSuggestionLabels() const = 0;
 #endif
 
     virtual void runOpenPanel(Frame&, FileChooser&) = 0;
@@ -302,9 +307,10 @@ public:
     // Allows ports to customize the type of graphics layers created by this page.
     virtual GraphicsLayerFactory* graphicsLayerFactory() const { return nullptr; }
 
-#if USE(REQUEST_ANIMATION_FRAME_DISPLAY_MONITOR)
     virtual RefPtr<DisplayRefreshMonitor> createDisplayRefreshMonitor(PlatformDisplayID) const { return nullptr; }
-#endif
+
+    virtual std::unique_ptr<ImageBuffer> createImageBuffer(const FloatSize&, ShouldAccelerate, ShouldUseDisplayList, RenderingPurpose, float, ColorSpace) const { return nullptr; }
+    virtual std::unique_ptr<ImageBuffer> createImageBuffer(const FloatSize&, RenderingMode, float, ColorSpace) const { return nullptr; }
 
     // Pass nullptr as the GraphicsLayer to detatch the root layer.
     virtual void attachRootGraphicsLayer(Frame&, GraphicsLayer*) = 0;
@@ -314,7 +320,8 @@ public:
     virtual void setNeedsOneShotDrawingSynchronization() = 0;
     // Sets a flag to specify that the view needs to be updated, so we need
     // to do an eager layout before the drawing.
-    virtual void scheduleCompositingLayerFlush() = 0;
+    virtual void scheduleRenderingUpdate() = 0;
+    virtual bool scheduleTimedRenderingUpdate() { return false; }
     virtual bool needsImmediateRenderingUpdate() const { return false; }
     // Returns whether or not the client can render the composited layer,
     // regardless of the settings.
@@ -338,9 +345,6 @@ public:
 
     // Returns true if layer tree updates are disabled.
     virtual bool layerTreeStateIsFrozen() const { return false; }
-    virtual bool layerFlushThrottlingIsActive() const { return false; }
-
-    virtual bool adjustLayerFlushThrottling(LayerFlushThrottleState::Flags) { return false; }
 
     virtual RefPtr<ScrollingCoordinator> createScrollingCoordinator(Page&) const { return nullptr; }
 
@@ -357,6 +361,12 @@ public:
     virtual void clearPlaybackControlsManager() { }
 #endif
 
+#if ENABLE(MEDIA_USAGE)
+    virtual void addMediaUsageManagerSession(MediaSessionIdentifier, const String&, const URL&) { }
+    virtual void updateMediaUsageManagerSessionState(MediaSessionIdentifier, const MediaUsageInfo&) { }
+    virtual void removeMediaUsageManagerSession(MediaSessionIdentifier) { }
+#endif
+
     virtual void exitVideoFullscreenForVideoElement(HTMLVideoElement&) { }
     virtual void exitVideoFullscreenToModeWithoutAnimation(HTMLVideoElement&, HTMLMediaElementEnums::VideoFullscreenMode) { }
     virtual bool requiresFullscreenForVideoPlayback() { return false; }
@@ -366,6 +376,10 @@ public:
     virtual void enterFullScreenForElement(Element&) { }
     virtual void exitFullScreenForElement(Element*) { }
     virtual void setRootFullScreenLayer(GraphicsLayer*) { }
+#endif
+
+#if ENABLE(VIDEO_PRESENTATION_MODE)
+    virtual void setMockVideoPresentationModeEnabled(bool) { }
 #endif
 
 #if USE(COORDINATED_GRAPHICS)
@@ -467,12 +481,13 @@ public:
     virtual void inputElementDidResignStrongPasswordAppearance(HTMLInputElement&) { };
 
 #if ENABLE(WIRELESS_PLAYBACK_TARGET)
-    virtual void addPlaybackTargetPickerClient(uint64_t /*contextId*/) { }
-    virtual void removePlaybackTargetPickerClient(uint64_t /*contextId*/) { }
-    virtual void showPlaybackTargetPicker(uint64_t /*contextId*/, const IntPoint&, bool /*isVideo*/) { }
-    virtual void playbackTargetPickerClientStateDidChange(uint64_t /*contextId*/, MediaProducer::MediaStateFlags) { }
+    virtual void addPlaybackTargetPickerClient(PlaybackTargetClientContextIdentifier) { }
+    virtual void removePlaybackTargetPickerClient(PlaybackTargetClientContextIdentifier) { }
+    virtual void showPlaybackTargetPicker(PlaybackTargetClientContextIdentifier, const IntPoint&, bool /*isVideo*/) { }
+    virtual void playbackTargetPickerClientStateDidChange(PlaybackTargetClientContextIdentifier, MediaProducer::MediaStateFlags) { }
     virtual void setMockMediaPlaybackTargetPickerEnabled(bool)  { }
     virtual void setMockMediaPlaybackTargetPickerState(const String&, MediaPlaybackTargetContext::State) { }
+    virtual void mockMediaPlaybackTargetPickerDismissPopup() { }
 #endif
 
     virtual void imageOrMediaDocumentSizeChanged(const IntSize&) { }
@@ -487,8 +502,8 @@ public:
     virtual RefPtr<Icon> createIconForFiles(const Vector<String>& /* filenames */) = 0;
 
 #if ENABLE(RESOURCE_LOAD_STATISTICS)
-    virtual void hasStorageAccess(RegistrableDomain&& /*subFrameDomain*/, RegistrableDomain&& /*topFrameDomain*/, FrameIdentifier, PageIdentifier, WTF::CompletionHandler<void(bool)>&& completionHandler) { completionHandler(false); }
-    virtual void requestStorageAccess(RegistrableDomain&& /*subFrameDomain*/, RegistrableDomain&& /*topFrameDomain*/, FrameIdentifier, PageIdentifier, WTF::CompletionHandler<void(StorageAccessWasGranted, StorageAccessPromptWasShown)>&& completionHandler) { completionHandler(StorageAccessWasGranted::No, StorageAccessPromptWasShown::No); }
+    virtual void hasStorageAccess(RegistrableDomain&& /*subFrameDomain*/, RegistrableDomain&& /*topFrameDomain*/, Frame&, WTF::CompletionHandler<void(bool)>&& completionHandler) { completionHandler(false); }
+    virtual void requestStorageAccess(RegistrableDomain&& subFrameDomain, RegistrableDomain&& topFrameDomain, Frame&, StorageAccessScope scope, WTF::CompletionHandler<void(RequestStorageAccessResult)>&& completionHandler) { completionHandler({ StorageAccessWasGranted::No, StorageAccessPromptWasShown::No, scope, WTFMove(topFrameDomain), WTFMove(subFrameDomain) }); }
 #endif
 
 #if ENABLE(DEVICE_ORIENTATION)
@@ -510,6 +525,12 @@ public:
 
     virtual bool userIsInteracting() const { return false; }
     virtual void setUserIsInteracting(bool) { }
+
+#if ENABLE(WEB_AUTHN)
+    virtual void setMockWebAuthenticationConfiguration(const MockWebAuthenticationConfiguration&) { }
+#endif
+
+    virtual void animationDidFinishForElement(const Element&) { }
 
 protected:
     virtual ~ChromeClient() = default;

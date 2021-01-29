@@ -61,7 +61,7 @@ public:
     void notImplemented() const { RELEASE_ASSERT_NOT_REACHED(); }
 
     void contextDestroyed();
-    virtual void checkForOutstandingCallbacks() { /* notImplemented(); */ }
+    virtual void waitForOutstandingCallbacks() { /* notImplemented(); */ }
 
     void makeWindowObject(JSContextRef, JSObjectRef windowObject, JSValueRef* exception);
 
@@ -105,12 +105,24 @@ public:
     virtual void becomeFirstResponder() { notImplemented(); }
     virtual void resignFirstResponder() { notImplemented(); }
 
+    virtual void copyText(JSStringRef) { notImplemented(); }
+    virtual void paste() { notImplemented(); }
+
+    virtual void chooseMenuAction(JSStringRef, JSValueRef);
+    virtual void dismissMenu();
+
     virtual void firstResponderSuppressionForWebView(bool) { notImplemented(); }
     virtual void makeWindowContentViewFirstResponder() { notImplemented(); }
     virtual bool isWindowContentViewFirstResponder() const { notImplemented(); return false; }
 
     virtual void removeViewFromWindow(JSValueRef) { notImplemented(); }
     virtual void addViewToWindow(JSValueRef) { notImplemented(); }
+
+    virtual void installTapGestureOnWindow(JSValueRef) { notImplemented(); }
+
+    // Editable region
+
+    virtual bool mayContainEditableElementsInRect(unsigned, unsigned, unsigned, unsigned) { notImplemented(); return false; }
 
     // Compositing
 
@@ -137,9 +149,12 @@ public:
     virtual void liftUpAtPoint(long x, long y, long touchCount, JSValueRef callback) { notImplemented(); }
     virtual void singleTapAtPoint(long x, long y, JSValueRef callback) { notImplemented(); }
     virtual void singleTapAtPointWithModifiers(long x, long y, JSValueRef modifierArray, JSValueRef callback) { notImplemented(); }
+    virtual void twoFingerSingleTapAtPoint(long x, long y, JSValueRef callback) { notImplemented(); }
     virtual void doubleTapAtPoint(long x, long y, float delay, JSValueRef callback) { notImplemented(); }
     virtual void dragFromPointToPoint(long startX, long startY, long endX, long endY, double durationSeconds, JSValueRef callback) { notImplemented(); }
     virtual void longPressAtPoint(long x, long y, JSValueRef callback) { notImplemented(); }
+
+    virtual void activateAtPoint(long x, long y, JSValueRef callback) { notImplemented(); }
 
     // Keyboard
 
@@ -148,6 +163,13 @@ public:
 
     virtual void keyDown(JSStringRef character, JSValueRef modifierArray) { notImplemented(); }
     virtual void toggleCapsLock(JSValueRef callback) { notImplemented(); }
+    virtual void setContinuousSpellCheckingEnabled(bool) { notImplemented(); }
+    virtual void setSpellCheckerResults(JSValueRef) { notImplemented(); }
+    virtual bool keyboardIsAutomaticallyShifted() const
+    {
+        notImplemented();
+        return false;
+    }
 
     virtual void rawKeyDown(JSStringRef) { notImplemented(); }
     virtual void rawKeyUp(JSStringRef) { notImplemented(); }
@@ -165,7 +187,9 @@ public:
     virtual void setKeyboardInputModeIdentifier(JSStringRef) { notImplemented(); }
 
     virtual void replaceTextAtRange(JSStringRef, int location, int length) { notImplemented(); }
-    virtual void removeAllDynamicDictionaries() { notImplemented(); }
+
+    virtual bool windowIsKey() const;
+    virtual void setWindowIsKey(bool);
 
     // Stylus
 
@@ -185,18 +209,18 @@ public:
     virtual void dismissFilePicker(JSValueRef callback) { notImplemented(); }
     virtual void dismissFormAccessoryView() { notImplemented(); }
     virtual void selectFormAccessoryPickerRow(long) { notImplemented(); }
+    virtual bool selectFormAccessoryHasCheckedItemAtRow(long) const { return false; }
     virtual JSRetainPtr<JSStringRef> textContentType() const { notImplemented(); return nullptr; }
     virtual JSRetainPtr<JSStringRef> selectFormPopoverTitle() const { notImplemented(); return nullptr; }
     virtual JSRetainPtr<JSStringRef> formInputLabel() const { notImplemented(); return nullptr; }
     virtual void setTimePickerValue(long hour, long minute) { notImplemented(); }
+    virtual double timePickerValueHour() const { notImplemented(); return -1; }
+    virtual double timePickerValueMinute() const { notImplemented(); return -1; }
     virtual bool isShowingDataListSuggestions() const { notImplemented(); return false; }
     virtual JSObjectRef calendarType() const { notImplemented(); return nullptr; }
-    virtual void setDefaultCalendarType(JSStringRef calendarIdentifier) { notImplemented(); }
+    virtual void setDefaultCalendarType(JSStringRef calendarIdentifier, JSStringRef localeIdentifier) { notImplemented(); }
     virtual JSObjectRef inputViewBounds() const { notImplemented(); return nullptr; }
-
-    // Share Sheet
-
-    virtual void setShareSheetCompletesImmediatelyWithResolution(bool resolved) { notImplemented(); }
+    virtual void activateDataListSuggestion(unsigned, JSValueRef) { notImplemented(); }
 
     // Find in Page
 
@@ -225,6 +249,7 @@ public:
     virtual bool isShowingMenu() const { notImplemented(); return false; }
     virtual JSObjectRef rectForMenuAction(JSStringRef action) const { notImplemented(); return nullptr; }
     virtual JSObjectRef menuRect() const { notImplemented(); return nullptr; }
+    virtual bool isShowingContextMenu() const { notImplemented(); return false; }
 
     // Selection
 
@@ -262,11 +287,11 @@ public:
     virtual void setDidEndFormControlInteractionCallback(JSValueRef);
     JSValueRef didEndFormControlInteractionCallback() const;
 
-    virtual void setDidShowForcePressPreviewCallback(JSValueRef);
-    JSValueRef didShowForcePressPreviewCallback() const;
+    virtual void setDidShowContextMenuCallback(JSValueRef);
+    JSValueRef didShowContextMenuCallback() const;
 
-    virtual void setDidDismissForcePressPreviewCallback(JSValueRef);
-    JSValueRef didDismissForcePressPreviewCallback() const;
+    virtual void setDidDismissContextMenuCallback(JSValueRef);
+    JSValueRef didDismissContextMenuCallback() const;
 
     virtual void setWillBeginZoomingCallback(JSValueRef);
     JSValueRef willBeginZoomingCallback() const;

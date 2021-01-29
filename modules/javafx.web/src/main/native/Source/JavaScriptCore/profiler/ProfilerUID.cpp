@@ -26,7 +26,8 @@
 #include "config.h"
 #include "ProfilerUID.h"
 
-#include "JSCInlines.h"
+#include "JSCJSValueInlines.h"
+#include "JSGlobalObject.h"
 #include <wtf/Lock.h>
 
 namespace JSC { namespace Profiler {
@@ -47,9 +48,9 @@ void UID::dump(PrintStream& out) const
     out.print(m_uid);
 }
 
-JSValue UID::toJS(ExecState* exec) const
+JSValue UID::toJS(JSGlobalObject* globalObject) const
 {
-    return jsString(exec->vm(), toString(*this));
+    return jsString(globalObject->vm(), toString(*this));
 }
 
 } } // namespace JSC::Profiler

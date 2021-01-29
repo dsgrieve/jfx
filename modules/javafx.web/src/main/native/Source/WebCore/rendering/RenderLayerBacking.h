@@ -35,11 +35,21 @@
 
 namespace WebCore {
 
+class EventRegionContext;
 class KeyframeList;
 class PaintedContentsInfo;
 class RenderLayerCompositor;
 class TiledBacking;
 class TransformationMatrix;
+
+
+#if __WORDSIZE == 64 && PLATFORM(COCOA)
+#define USE_OWNING_LAYER_BEAR_TRAP 1
+#define BEAR_TRAP_VALUE 0xEEEEEEEEEEEEEEEE
+#else
+#define USE_OWNING_LAYER_BEAR_TRAP 0
+#endif
+
 
 enum CompositingLayerType {
     NormalCompositingLayer, // non-tiled layer with backing store
@@ -81,10 +91,10 @@ public:
     void updateConfigurationAfterStyleChange();
 
     // Returns true if layer configuration changed.
-    bool updateConfiguration();
+    bool updateConfiguration(const RenderLayer* compositingAncestor);
 
     // Update graphics layer position and bounds.
-    void updateGeometry();
+    void updateGeometry(const RenderLayer* compositingAncestor);
 
     // Update state the requires that descendant layers have been updated.
     void updateAfterDescendants();
@@ -109,6 +119,8 @@ public:
     GraphicsLayer* foregroundLayer() const { return m_foregroundLayer.get(); }
     GraphicsLayer* backgroundLayer() const { return m_backgroundLayer.get(); }
     bool backgroundLayerPaintsFixedRootBackground() const { return m_backgroundLayerPaintsFixedRootBackground; }
+
+    bool needsRepaintOnCompositedScroll() const;
 
     bool requiresBackgroundLayer() const { return m_requiresBackgroundLayer; }
     void setRequiresBackgroundLayer(bool);
@@ -138,27 +150,7 @@ public:
         return 0;
     }
 
-    void setScrollingNodeIDForRole(ScrollingNodeID nodeID, ScrollCoordinationRole role)
-    {
-        switch (role) {
-        case ScrollCoordinationRole::Scrolling:
-            m_scrollingNodeID = nodeID;
-            break;
-        case ScrollCoordinationRole::ScrollingProxy:
-            // These nodeIDs are stored in m_ancestorClippingStack.
-            ASSERT_NOT_REACHED();
-            break;
-        case ScrollCoordinationRole::FrameHosting:
-            m_frameHostingNodeID = nodeID;
-            break;
-        case ScrollCoordinationRole::ViewportConstrained:
-            m_viewportConstrainedNodeID = nodeID;
-            break;
-        case ScrollCoordinationRole::Positioning:
-            m_positioningNodeID = nodeID;
-            break;
-        }
-    }
+    void setScrollingNodeIDForRole(ScrollingNodeID, ScrollCoordinationRole);
 
     ScrollingNodeID scrollingNodeIDForChildren() const;
 
@@ -196,7 +188,6 @@ public:
 
     bool startAnimation(double timeOffset, const Animation&, const KeyframeList&);
     void animationPaused(double timeOffset, const String& name);
-    void animationSeeked(double timeOffset, const String& name);
     void animationFinished(const String& name);
 
     void suspendAnimations(MonotonicTime = MonotonicTime());
@@ -210,7 +201,13 @@ public:
 
     void updateAllowsBackingStoreDetaching(const LayoutRect& absoluteBounds);
 
+#if ENABLE(ASYNC_SCROLLING)
+    bool maintainsEventRegion() const;
     void updateEventRegion();
+
+    bool needsEventRegionUpdate() const { return m_needsEventRegionUpdate; }
+    void setNeedsEventRegionUpdate(bool needsUpdate = true) { m_needsEventRegionUpdate = needsUpdate; }
+#endif
 
     void updateAfterWidgetResize();
     void positionOverflowControlsLayers();
@@ -230,7 +227,7 @@ public:
     void notifyFlushRequired(const GraphicsLayer*) override;
     void notifyFlushBeforeDisplayRefresh(const GraphicsLayer*) override;
 
-    void paintContents(const GraphicsLayer*, GraphicsContext&, OptionSet<GraphicsLayerPaintingPhase>, const FloatRect& clip, GraphicsLayerPaintBehavior) override;
+    void paintContents(const GraphicsLayer*, GraphicsContext&, const FloatRect& clip, GraphicsLayerPaintBehavior) override;
 
     float deviceScaleFactor() const override;
     float contentsScaleMultiplierForNewTiles(const GraphicsLayer*) const override;
@@ -271,6 +268,7 @@ public:
     GraphicsLayer* layerForHorizontalScrollbar() const { return m_layerForHorizontalScrollbar.get(); }
     GraphicsLayer* layerForVerticalScrollbar() const { return m_layerForVerticalScrollbar.get(); }
     GraphicsLayer* layerForScrollCorner() const { return m_layerForScrollCorner.get(); }
+    GraphicsLayer* overflowControlsContainer() const { return m_overflowControlsContainer.get(); }
 
     bool canCompositeFilters() const { return m_canCompositeFilters; }
 #if ENABLE(FILTERS_LEVEL_2)
@@ -312,6 +310,8 @@ private:
     bool updateForegroundLayer(bool needsForegroundLayer);
     bool updateBackgroundLayer(bool needsBackgroundLayer);
     bool updateMaskingLayer(bool hasMask, bool hasClipPath);
+
+    bool requiresLayerForScrollbar(Scrollbar*) const;
     bool requiresHorizontalScrollbarLayer() const;
     bool requiresVerticalScrollbarLayer() const;
     bool requiresScrollCornerLayer() const;
@@ -333,6 +333,7 @@ private:
 
     void updateOpacity(const RenderStyle&);
     void updateTransform(const RenderStyle&);
+    void updateChildrenTransformAndAnchorPoint(const LayoutRect& primaryGraphicsLayerRect, LayoutSize offsetFromParentGraphicsLayer);
     void updateFilters(const RenderStyle&);
 #if ENABLE(FILTERS_LEVEL_2)
     void updateBackdropFilters(const RenderStyle&);
@@ -367,6 +368,7 @@ private:
     void updateDirectlyCompositedBackgroundImage(PaintedContentsInfo&, bool& didUpdateContentsRect);
 
     void resetContentsRect();
+    void updateContentsRects();
 
     bool isPaintDestinationForDescendantLayers(RenderLayer::PaintedContentRequest&) const;
     bool hasVisibleNonCompositedDescendants() const;
@@ -376,7 +378,8 @@ private:
     bool hasTiledBackingFlatteningLayer() const { return (m_childContainmentLayer && m_isFrameLayerWithTiledBacking); }
     GraphicsLayer* tileCacheFlatteningLayer() const { return m_isFrameLayerWithTiledBacking ? m_childContainmentLayer.get() : nullptr; }
 
-    void paintIntoLayer(const GraphicsLayer*, GraphicsContext&, const IntRect& paintDirtyRect, OptionSet<PaintBehavior>, OptionSet<GraphicsLayerPaintingPhase>);
+    void paintIntoLayer(const GraphicsLayer*, GraphicsContext&, const IntRect& paintDirtyRect, OptionSet<PaintBehavior>, EventRegionContext* = nullptr);
+    OptionSet<RenderLayer::PaintLayerFlag> paintFlagsForLayer(const GraphicsLayer&) const;
 
     void paintDebugOverlays(const GraphicsLayer*, GraphicsContext&);
 
@@ -385,8 +388,11 @@ private:
 
     bool canIssueSetNeedsDisplay() const { return !paintsIntoWindow() && !paintsIntoCompositedAncestor(); }
     LayoutRect computeParentGraphicsLayerRect(const RenderLayer* compositedAncestor) const;
-    LayoutRect computePrimaryGraphicsLayerRect(const LayoutRect& parentGraphicsLayerRect) const;
+    LayoutRect computePrimaryGraphicsLayerRect(const RenderLayer* compositedAncestor, const LayoutRect& parentGraphicsLayerRect) const;
 
+#if USE(OWNING_LAYER_BEAR_TRAP)
+    uintptr_t m_owningLayerBearTrap { BEAR_TRAP_VALUE }; // webkit.org/b.206915
+#endif
     RenderLayer& m_owningLayer;
 
     // A list other layers that paint into this backing store, later than m_owningLayer in paint order.
@@ -405,6 +411,7 @@ private:
     RefPtr<GraphicsLayer> m_layerForHorizontalScrollbar;
     RefPtr<GraphicsLayer> m_layerForVerticalScrollbar;
     RefPtr<GraphicsLayer> m_layerForScrollCorner;
+    RefPtr<GraphicsLayer> m_overflowControlsContainer;
 
     RefPtr<GraphicsLayer> m_scrollContainerLayer; // Only used if the layer is using composited scrolling.
     RefPtr<GraphicsLayer> m_scrolledContentsLayer; // Only used if the layer is using composited scrolling.
@@ -430,6 +437,9 @@ private:
     bool m_requiresBackgroundLayer { false };
     bool m_hasSubpixelRounding { false };
     bool m_paintsSubpixelAntialiasedText { false }; // This is for logging only.
+#if ENABLE(ASYNC_SCROLLING)
+    bool m_needsEventRegionUpdate { true };
+#endif
 };
 
 enum CanvasCompositingStrategy {

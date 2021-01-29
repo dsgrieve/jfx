@@ -25,7 +25,6 @@
 
 #include "config.h"
 
-#include "BatchedTransitionOptimizer.h"
 #include "CodeBlock.h"
 #include "Debugger.h"
 #include "EvalCodeBlock.h"
@@ -33,21 +32,21 @@
 #include "GlobalExecutable.h"
 #include "IsoCellSetInlines.h"
 #include "JIT.h"
-#include "JSCInlines.h"
+#include "JSCellInlines.h"
+#include "JSGlobalObjectInlines.h"
+#include "JSObjectInlines.h"
 #include "JSTemplateObjectDescriptor.h"
 #include "LLIntEntrypoint.h"
 #include "ModuleProgramCodeBlock.h"
-#include "Parser.h"
+#include "ParserError.h"
 #include "ProgramCodeBlock.h"
-#include "TypeProfiler.h"
 #include "VMInlines.h"
-#include <wtf/CommaPrinter.h>
 
 namespace JSC {
 
 const ClassInfo ScriptExecutable::s_info = { "ScriptExecutable", &ExecutableBase::s_info, nullptr, nullptr, CREATE_METHOD_TABLE(ScriptExecutable) };
 
-ScriptExecutable::ScriptExecutable(Structure* structure, VM& vm, const SourceCode& source, bool isInStrictContext, DerivedContextType derivedContextType, bool isInArrowFunctionContext, EvalContextType evalContextType, Intrinsic intrinsic)
+ScriptExecutable::ScriptExecutable(Structure* structure, VM& vm, const SourceCode& source, bool isInStrictContext, DerivedContextType derivedContextType, bool isInArrowFunctionContext, bool isInsideOrdinaryFunction, EvalContextType evalContextType, Intrinsic intrinsic)
     : ExecutableBase(vm, structure)
     , m_source(source)
     , m_intrinsic(intrinsic)
@@ -59,6 +58,7 @@ ScriptExecutable::ScriptExecutable(Structure* structure, VM& vm, const SourceCod
     , m_isArrowFunctionContext(isInArrowFunctionContext)
     , m_canUseOSRExitFuzzing(true)
     , m_codeForGeneratorBodyWasGenerated(false)
+    , m_isInsideOrdinaryFunction(isInsideOrdinaryFunction)
     , m_derivedContextType(static_cast<unsigned>(derivedContextType))
     , m_evalContextType(static_cast<unsigned>(evalContextType))
 {
@@ -196,8 +196,7 @@ void ScriptExecutable::installCode(VM& vm, CodeBlock* genericCodeBlock, CodeType
         RELEASE_ASSERT(genericCodeBlock->ownerExecutable() == this);
         RELEASE_ASSERT(JITCode::isExecutableScript(genericCodeBlock->jitType()));
 
-        if (UNLIKELY(Options::verboseOSR()))
-            dataLog("Installing ", *genericCodeBlock, "\n");
+        dataLogLnIf(Options::verboseOSR(), "Installing ", *genericCodeBlock);
 
         if (UNLIKELY(vm.m_perBytecodeProfiler))
             vm.m_perBytecodeProfiler->ensureBytecodesFor(genericCodeBlock);
@@ -256,20 +255,19 @@ CodeBlock* ScriptExecutable::newCodeBlockFor(
     ASSERT(endColumn() != UINT_MAX);
 
     JSGlobalObject* globalObject = scope->globalObject(vm);
-    ExecState* exec = globalObject->globalExec();
 
     if (classInfo(vm) == EvalExecutable::info()) {
         EvalExecutable* executable = jsCast<EvalExecutable*>(this);
         RELEASE_ASSERT(kind == CodeForCall);
         RELEASE_ASSERT(!executable->m_evalCodeBlock);
         RELEASE_ASSERT(!function);
-        auto codeBlock = EvalCodeBlock::create(vm,
+        auto* codeBlock = EvalCodeBlock::create(vm,
             executable, executable->m_unlinkedEvalCodeBlock.get(), scope);
         EXCEPTION_ASSERT(throwScope.exception() || codeBlock);
         if (!codeBlock) {
             exception = throwException(
-                exec, throwScope,
-                createOutOfMemoryError(exec));
+                globalObject, throwScope,
+                createOutOfMemoryError(globalObject));
             return nullptr;
         }
         return codeBlock;
@@ -280,13 +278,13 @@ CodeBlock* ScriptExecutable::newCodeBlockFor(
         RELEASE_ASSERT(kind == CodeForCall);
         RELEASE_ASSERT(!executable->m_programCodeBlock);
         RELEASE_ASSERT(!function);
-        auto codeBlock = ProgramCodeBlock::create(vm,
+        auto* codeBlock = ProgramCodeBlock::create(vm,
             executable, executable->m_unlinkedProgramCodeBlock.get(), scope);
         EXCEPTION_ASSERT(throwScope.exception() || codeBlock);
         if (!codeBlock) {
             exception = throwException(
-                exec, throwScope,
-                createOutOfMemoryError(exec));
+                globalObject, throwScope,
+                createOutOfMemoryError(globalObject));
             return nullptr;
         }
         return codeBlock;
@@ -297,13 +295,13 @@ CodeBlock* ScriptExecutable::newCodeBlockFor(
         RELEASE_ASSERT(kind == CodeForCall);
         RELEASE_ASSERT(!executable->m_moduleProgramCodeBlock);
         RELEASE_ASSERT(!function);
-        auto codeBlock = ModuleProgramCodeBlock::create(vm,
+        auto* codeBlock = ModuleProgramCodeBlock::create(vm,
             executable, executable->m_unlinkedModuleProgramCodeBlock.get(), scope);
         EXCEPTION_ASSERT(throwScope.exception() || codeBlock);
         if (!codeBlock) {
             exception = throwException(
-                exec, throwScope,
-                createOutOfMemoryError(exec));
+                globalObject, throwScope,
+                createOutOfMemoryError(globalObject));
             return nullptr;
         }
         return codeBlock;
@@ -334,12 +332,15 @@ CodeBlock* ScriptExecutable::newCodeBlockFor(
         lastLine(), endColumn());
     if (!unlinkedCodeBlock) {
         exception = throwException(
-            globalObject->globalExec(), throwScope,
+            globalObject, throwScope,
             error.toErrorObject(globalObject, executable->source()));
         return nullptr;
     }
 
-    RELEASE_AND_RETURN(throwScope, FunctionCodeBlock::create(vm, executable, unlinkedCodeBlock, scope));
+    auto* codeBlock = FunctionCodeBlock::create(vm, executable, unlinkedCodeBlock, scope);
+    if (throwScope.exception())
+        exception = throwScope.exception();
+    return codeBlock;
 }
 
 CodeBlock* ScriptExecutable::newReplacementCodeBlockFor(
@@ -413,8 +414,8 @@ Exception* ScriptExecutable::prepareForExecutionImpl(
     DeferGCForAWhile deferGC(vm.heap);
 
     if (UNLIKELY(vm.getAndClearFailNextNewCodeBlock())) {
-        auto& state = *scope->globalObject(vm)->globalExec();
-        return throwException(&state, throwScope, createError(&state, "Forced Failure"_s));
+        JSGlobalObject* globalObject = scope->globalObject(vm);
+        return throwException(globalObject, throwScope, createError(globalObject, "Forced Failure"_s));
     }
 
     Exception* exception = nullptr;
@@ -446,9 +447,9 @@ ScriptExecutable* ScriptExecutable::topLevelExecutable()
     }
 }
 
-JSArray* ScriptExecutable::createTemplateObject(ExecState* exec, JSTemplateObjectDescriptor* descriptor)
+JSArray* ScriptExecutable::createTemplateObject(JSGlobalObject* globalObject, JSTemplateObjectDescriptor* descriptor)
 {
-    VM& vm = exec->vm();
+    VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
 
     TemplateObjectMap& templateObjectMap = ensureTemplateObjectMap(vm);
@@ -459,7 +460,7 @@ JSArray* ScriptExecutable::createTemplateObject(ExecState* exec, JSTemplateObjec
     }
     if (JSArray* array = result.iterator->value.get())
         return array;
-    JSArray* templateObject = descriptor->createTemplateObject(exec);
+    JSArray* templateObject = descriptor->createTemplateObject(globalObject);
     RETURN_IF_EXCEPTION(scope, nullptr);
     result.iterator->value.set(vm, this, templateObject);
     return templateObject;

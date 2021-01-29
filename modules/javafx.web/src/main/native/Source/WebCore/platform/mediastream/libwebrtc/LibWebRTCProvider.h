@@ -25,8 +25,8 @@
 
 #pragma once
 
+#include "DocumentIdentifier.h"
 #include "LibWebRTCMacros.h"
-#include <pal/SessionID.h>
 #include <wtf/CompletionHandler.h>
 #include <wtf/Expected.h>
 #include <wtf/UniqueRef.h>
@@ -36,10 +36,10 @@
 
 ALLOW_UNUSED_PARAMETERS_BEGIN
 
-#include <webrtc/api/peerconnectioninterface.h>
+#include <webrtc/api/peer_connection_interface.h>
 #include <webrtc/api/video_codecs/video_encoder_factory.h>
 #include <webrtc/api/video_codecs/video_decoder_factory.h>
-#include <webrtc/rtc_base/scoped_ref_ptr.h>
+#include <webrtc/api/scoped_refptr.h>
 
 ALLOW_UNUSED_PARAMETERS_END
 
@@ -59,6 +59,7 @@ class PeerConnectionFactoryInterface;
 namespace WebCore {
 
 class LibWebRTCAudioModule;
+struct PeerConnectionFactoryAndThreads;
 struct RTCRtpCapabilities;
 
 enum class MDNSRegisterError { NotImplemented, BadParameter, DNSSD, Internal, Timeout };
@@ -71,6 +72,7 @@ public:
     virtual ~LibWebRTCProvider() = default;
 
     static bool webRTCAvailable();
+    static void registerWebKitVP9Decoder();
 
     virtual void setActive(bool);
 
@@ -79,14 +81,10 @@ public:
     using IPAddressOrError = Expected<String, MDNSRegisterError>;
     using MDNSNameOrError = Expected<String, MDNSRegisterError>;
 
-    virtual void unregisterMDNSNames(uint64_t documentIdentifier)
-    {
-        UNUSED_PARAM(documentIdentifier);
-    }
+    virtual void unregisterMDNSNames(DocumentIdentifier) { }
 
-    virtual void registerMDNSName(PAL::SessionID, uint64_t documentIdentifier, const String& ipAddress, CompletionHandler<void(MDNSNameOrError&&)>&& callback)
+    virtual void registerMDNSName(DocumentIdentifier, const String& ipAddress, CompletionHandler<void(MDNSNameOrError&&)>&& callback)
     {
-        UNUSED_PARAM(documentIdentifier);
         UNUSED_PARAM(ipAddress);
         callback(makeUnexpected(MDNSRegisterError::NotImplemented));
     }
@@ -99,6 +97,7 @@ public:
     // FIXME: Make these methods not static.
     static void callOnWebRTCNetworkThread(Function<void()>&&);
     static void callOnWebRTCSignalingThread(Function<void()>&&);
+    static bool hasWebRTCThreads();
 
     // Used for mock testing
     void setPeerConnectionFactory(rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>&&);
@@ -106,10 +105,14 @@ public:
     void disableEnumeratingAllNetworkInterfaces();
     void enableEnumeratingAllNetworkInterfaces();
 
-    void supportsVP8(bool value) { m_supportsVP8 = value; }
+    void setH265Support(bool value) { m_supportsH265 = value; }
+    void setVP9Support(bool value) { m_supportsVP9 = value; }
+    bool isSupportingH265() const { return m_supportsH265; }
+    bool isSupportingVP9() const { return m_supportsVP9; }
     virtual void disableNonLocalhostConnections() { m_disableNonLocalhostConnections = true; }
 
-    rtc::RTCCertificateGenerator& certificateGenerator();
+    // Callback is executed on a background thread.
+    void prepareCertificateGenerator(Function<void(rtc::RTCCertificateGenerator&)>&&);
 
     Optional<RTCRtpCapabilities> receiverCapabilities(const String& kind);
     Optional<RTCRtpCapabilities> senderCapabilities(const String& kind);
@@ -118,8 +121,15 @@ public:
 
     void setEnableLogging(bool);
     void setEnableWebRTCEncryption(bool);
+    void setUseDTLS10(bool);
 
-    virtual std::unique_ptr<rtc::PacketSocketFactory> createSocketFactory(PAL::SessionID, String&& /* userAgent */) { return nullptr; }
+    class SuspendableSocketFactory : public rtc::PacketSocketFactory {
+    public:
+        virtual ~SuspendableSocketFactory() = default;
+        virtual void suspend() { };
+        virtual void resume() { };
+    };
+    virtual std::unique_ptr<SuspendableSocketFactory> createSocketFactory(String&& /* userAgent */) { return nullptr; }
 
 protected:
     LibWebRTCProvider() = default;
@@ -130,14 +140,20 @@ protected:
     virtual std::unique_ptr<webrtc::VideoDecoderFactory> createDecoderFactory();
     virtual std::unique_ptr<webrtc::VideoEncoderFactory> createEncoderFactory();
 
+    virtual void startedNetworkThread() { };
+
+    PeerConnectionFactoryAndThreads& getStaticFactoryAndThreads(bool useNetworkThreadWithSocketServer);
+
     bool m_enableEnumeratingAllNetworkInterfaces { false };
     // FIXME: Remove m_useNetworkThreadWithSocketServer member variable and make it a global.
     bool m_useNetworkThreadWithSocketServer { true };
 
     rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> m_factory;
     bool m_disableNonLocalhostConnections { false };
-    bool m_supportsVP8 { false };
+    bool m_supportsH265 { false };
+    bool m_supportsVP9 { false };
     bool m_enableLogging { true };
+    bool m_useDTLS10 { false };
 #endif
 };
 

@@ -39,7 +39,6 @@ WTF_MAKE_ISO_ALLOCATED_IMPL(SVGImageElement);
 
 inline SVGImageElement::SVGImageElement(const QualifiedName& tagName, Document& document)
     : SVGGraphicsElement(tagName, document)
-    , SVGExternalResourcesRequired(this)
     , SVGURIReference(this)
     , m_imageLoader(*this)
 {
@@ -70,27 +69,24 @@ bool SVGImageElement::hasSingleSecurityOrigin() const
 void SVGImageElement::parseAttribute(const QualifiedName& name, const AtomString& value)
 {
     if (name == SVGNames::preserveAspectRatioAttr) {
-        SVGPreserveAspectRatioValue preserveAspectRatio;
-        preserveAspectRatio.parse(value);
-        m_preserveAspectRatio->setBaseValInternal(preserveAspectRatio);
+        m_preserveAspectRatio->setBaseValInternal(SVGPreserveAspectRatioValue { value });
         return;
     }
 
     SVGParsingError parseError = NoError;
 
     if (name == SVGNames::xAttr)
-        m_x->setBaseValInternal(SVGLengthValue::construct(LengthModeWidth, value, parseError));
+        m_x->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Width, value, parseError));
     else if (name == SVGNames::yAttr)
-        m_y->setBaseValInternal(SVGLengthValue::construct(LengthModeHeight, value, parseError));
+        m_y->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Height, value, parseError));
     else if (name == SVGNames::widthAttr)
-        m_width->setBaseValInternal(SVGLengthValue::construct(LengthModeWidth, value, parseError, ForbidNegativeLengths));
+        m_width->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Width, value, parseError, SVGLengthNegativeValuesMode::Forbid));
     else if (name == SVGNames::heightAttr)
-        m_height->setBaseValInternal(SVGLengthValue::construct(LengthModeHeight, value, parseError, ForbidNegativeLengths));
+        m_height->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Height, value, parseError, SVGLengthNegativeValuesMode::Forbid));
 
     reportAttributeParsingError(parseError, name, value);
 
     SVGGraphicsElement::parseAttribute(name, value);
-    SVGExternalResourcesRequired::parseAttribute(name, value);
     SVGURIReference::parseAttribute(name, value);
 }
 
@@ -126,7 +122,6 @@ void SVGImageElement::svgAttributeChanged(const QualifiedName& attrName)
     }
 
     SVGGraphicsElement::svgAttributeChanged(attrName);
-    SVGExternalResourcesRequired::svgAttributeChanged(attrName);
 }
 
 RenderPtr<RenderElement> SVGImageElement::createElementRenderer(RenderStyle&& style, const RenderTreePosition&)
@@ -136,7 +131,7 @@ RenderPtr<RenderElement> SVGImageElement::createElementRenderer(RenderStyle&& st
 
 bool SVGImageElement::haveLoadedRequiredResources()
 {
-    return !externalResourcesRequired() || !m_imageLoader.hasPendingActivity();
+    return !m_imageLoader.hasPendingActivity();
 }
 
 void SVGImageElement::didAttachRenderers()
@@ -174,7 +169,7 @@ void SVGImageElement::addSubresourceAttributeURLs(ListHashSet<URL>& urls) const
 
 void SVGImageElement::didMoveToNewDocument(Document& oldDocument, Document& newDocument)
 {
-    m_imageLoader.elementDidMoveToNewDocument();
+    m_imageLoader.elementDidMoveToNewDocument(oldDocument);
     SVGGraphicsElement::didMoveToNewDocument(oldDocument, newDocument);
 }
 

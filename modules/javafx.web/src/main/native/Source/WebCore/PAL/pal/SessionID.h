@@ -55,6 +55,11 @@ public:
     {
     }
 
+    explicit SessionID(uint64_t identifier)
+        : m_identifier(identifier)
+    {
+    }
+
     PAL_EXPORT static SessionID generateEphemeralSessionID();
     PAL_EXPORT static SessionID generatePersistentSessionID();
     PAL_EXPORT static void enableGenerationProtection();
@@ -76,11 +81,6 @@ public:
     explicit operator bool() const { return m_identifier; }
 
 private:
-    explicit SessionID(uint64_t identifier)
-        : m_identifier(identifier)
-    {
-    }
-
     static bool isValidSessionIDValue(uint64_t sessionID) { return sessionID != HashTableEmptyValueID && sessionID != HashTableDeletedValueID; }
 
     uint64_t m_identifier;
@@ -98,9 +98,8 @@ Optional<SessionID> SessionID::decode(Decoder& decoder)
 {
     Optional<uint64_t> sessionID;
     decoder >> sessionID;
-    if (!sessionID)
+    if (!sessionID || !isValidSessionIDValue(*sessionID))
         return WTF::nullopt;
-    ASSERT(isValidSessionIDValue(*sessionID));
     return SessionID { *sessionID };
 }
 
@@ -120,8 +119,6 @@ template<> struct HashTraits<PAL::SessionID> : GenericHashTraits<PAL::SessionID>
     static bool isDeletedValue(const PAL::SessionID& slot) { return slot.isHashTableDeletedValue(); }
 };
 
-template<> struct DefaultHash<PAL::SessionID> {
-    typedef SessionIDHash Hash;
-};
+template<> struct DefaultHash<PAL::SessionID> : SessionIDHash { };
 
 } // namespace WTF

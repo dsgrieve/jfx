@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013-2017 Apple Inc. All rights reserved.
+ * Copyright (C) 2013-2020 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -28,11 +28,14 @@
 
 #include "AdaptiveInferredPropertyValueWatchpointBase.h"
 #include "JSImmutableButterfly.h"
+#include "JSObjectInlines.h"
 #include "JSPropertyNameEnumerator.h"
 #include "JSString.h"
-#include "JSCInlines.h"
 #include "ObjectPropertyConditionSet.h"
 #include "ObjectToStringAdaptiveStructureWatchpoint.h"
+#include "StructureChain.h"
+#include "StructureInlines.h"
+#include "StructureRareDataInlines.h"
 
 namespace JSC {
 
@@ -57,7 +60,8 @@ void StructureRareData::destroy(JSCell* cell)
 
 StructureRareData::StructureRareData(VM& vm, Structure* previous)
     : JSCell(vm, vm.structureRareDataStructure.get())
-    , m_giveUpOnObjectToStringValueCache(false)
+    , m_maxOffset(invalidOffset)
+    , m_transitionOffset(invalidOffset)
 {
     if (previous)
         m_previous.set(vm, this, previous);
@@ -70,7 +74,7 @@ void StructureRareData::visitChildren(JSCell* cell, SlotVisitor& visitor)
 
     Base::visitChildren(thisObject, visitor);
     visitor.append(thisObject->m_previous);
-    visitor.append(thisObject->m_objectToStringValue);
+    visitor.appendUnbarriered(thisObject->objectToStringValue());
     visitor.append(thisObject->m_cachedPropertyNameEnumerator);
     auto* cachedOwnKeys = thisObject->m_cachedOwnKeys.unvalidatedGet();
     if (cachedOwnKeys != cachedOwnKeysSentinel())
@@ -85,15 +89,15 @@ public:
     ObjectToStringAdaptiveInferredPropertyValueWatchpoint(const ObjectPropertyCondition&, StructureRareData*);
 
 private:
-    bool isValid() const override;
-    void handleFire(VM&, const FireDetail&) override;
+    bool isValid() const final;
+    void handleFire(VM&, const FireDetail&) final;
 
     StructureRareData* m_structureRareData;
 };
 
-void StructureRareData::setObjectToStringValue(ExecState* exec, VM& vm, Structure* ownStructure, JSString* value, PropertySlot toStringTagSymbolSlot)
+void StructureRareData::setObjectToStringValue(JSGlobalObject* globalObject, VM& vm, Structure* ownStructure, JSString* value, const PropertySlot& toStringTagSymbolSlot)
 {
-    if (m_giveUpOnObjectToStringValueCache)
+    if (canCacheObjectToStringValue())
         return;
 
     ObjectPropertyConditionSet conditionSet;
@@ -107,15 +111,17 @@ void StructureRareData::setObjectToStringValue(ExecState* exec, VM& vm, Structur
 
         // This will not create a condition for the current structure but that is good because we know the Symbol.toStringTag
         // is not on the ownStructure so we will transisition if one is added and this cache will no longer be used.
-        conditionSet = generateConditionsForPrototypePropertyHit(vm, this, exec, ownStructure, toStringTagSymbolSlot.slotBase(), vm.propertyNames->toStringTagSymbol.impl());
+        prepareChainForCaching(globalObject, ownStructure, toStringTagSymbolSlot.slotBase());
+        conditionSet = generateConditionsForPrototypePropertyHit(vm, this, globalObject, ownStructure, toStringTagSymbolSlot.slotBase(), vm.propertyNames->toStringTagSymbol.impl());
         ASSERT(!conditionSet.isValid() || conditionSet.hasOneSlotBaseCondition());
-    } else if (toStringTagSymbolSlot.isUnset())
-        conditionSet = generateConditionsForPropertyMiss(vm, this, exec, ownStructure, vm.propertyNames->toStringTagSymbol.impl());
-    else
+    } else if (toStringTagSymbolSlot.isUnset()) {
+        prepareChainForCaching(globalObject, ownStructure, nullptr);
+        conditionSet = generateConditionsForPropertyMiss(vm, this, globalObject, ownStructure, vm.propertyNames->toStringTagSymbol.impl());
+    } else
         return;
 
     if (!conditionSet.isValid()) {
-        m_giveUpOnObjectToStringValueCache = true;
+        giveUpOnObjectToStringValueCache();
         return;
     }
 
@@ -128,11 +134,11 @@ void StructureRareData::setObjectToStringValue(ExecState* exec, VM& vm, Structur
 
             // The equivalence condition won't be watchable if we have already seen a replacement.
             if (!equivCondition.isWatchable()) {
-                m_giveUpOnObjectToStringValueCache = true;
+                giveUpOnObjectToStringValueCache();
                 return;
             }
         } else if (!condition.isWatchable()) {
-            m_giveUpOnObjectToStringValueCache = true;
+            giveUpOnObjectToStringValueCache();
             return;
         }
     }
@@ -153,7 +159,8 @@ void StructureRareData::clearObjectToStringValue()
 {
     m_objectToStringAdaptiveWatchpointSet.clear();
     m_objectToStringAdaptiveInferredValueWatchpoint.reset();
-    m_objectToStringValue.clear();
+    if (!canCacheObjectToStringValue())
+        m_objectToStringValue.clear();
 }
 
 void StructureRareData::finalizeUnconditionally(VM& vm)

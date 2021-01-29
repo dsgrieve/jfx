@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -216,13 +216,13 @@ CString fileSystemRepresentation(const String& s)
     return CString(s.latin1().data());
 }
 
-String openTemporaryFile(const String&, PlatformFileHandle& handle)
+String openTemporaryFile(const String&, PlatformFileHandle& handle, const String&)
 {
     handle = invalidPlatformFileHandle;
     return String();
 }
 
-PlatformFileHandle openFile(const String& path, FileOpenMode mode)
+PlatformFileHandle openFile(const String& path, FileOpenMode mode, FileAccessPermission, bool)
 {
     if (mode != FileOpenMode::Read) {
         return invalidPlatformFileHandle;
@@ -291,9 +291,10 @@ int writeToFile(PlatformFileHandle, const char*, int)
     return -1;
 }
 
-bool truncateFile(PlatformFileHandle handle, long long offset)
+bool truncateFile(PlatformFileHandle, long long offset)
 {
     // FIXME: openjfx2.26 implement truncateFile
+    UNUSED_PARAM(offset);
     fprintf(stderr, "FileSystemJava::truncateFile notImplemented\n");
     return false;
 }
@@ -346,13 +347,7 @@ Optional<int32_t> getFileDeviceId(const CString&)
     return {};
 }
 
-MappedFileData::MappedFileData(const String& filePath, MappedFileMode mode, bool& success)
-{
-    fprintf(stderr, "MappedFileData::MappedFileData(const String&, MappedFileMode, bool&) notImplemented() \n");
-    success = false;
-}
-
-bool MappedFileData::mapFileHandle(PlatformFileHandle handle, MappedFileMode)
+bool MappedFileData::mapFileHandle(PlatformFileHandle, FileOpenMode, MappedFileMode)
 {
     fprintf(stderr, "MappedFileData::mapFileHandle(PlatformFileHandle handle, MappedFileMode) notImplemented()\n");
     return false;
@@ -363,6 +358,7 @@ bool unmapViewOfFile(void* , size_t)
     fprintf(stderr, "unmapViewOfFile(void* , size_t) notImplemented()\n");
     return false;
 }
+
 } // namespace FileSystemImpl
 
 } // namespace WTF

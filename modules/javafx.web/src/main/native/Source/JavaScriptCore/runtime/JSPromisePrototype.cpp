@@ -27,13 +27,7 @@
 #include "JSPromisePrototype.h"
 
 #include "BuiltinNames.h"
-#include "Error.h"
-#include "JSCBuiltins.h"
 #include "JSCInlines.h"
-#include "JSFunction.h"
-#include "JSGlobalObject.h"
-#include "JSPromise.h"
-#include "Microtask.h"
 
 namespace JSC {
 
@@ -45,21 +39,20 @@ STATIC_ASSERT_IS_TRIVIALLY_DESTRUCTIBLE(JSPromisePrototype);
 
 namespace JSC {
 
-const ClassInfo JSPromisePrototype::s_info = { "PromisePrototype", &Base::s_info, &promisePrototypeTable, nullptr, CREATE_METHOD_TABLE(JSPromisePrototype) };
+const ClassInfo JSPromisePrototype::s_info = { "Promise", &Base::s_info, &promisePrototypeTable, nullptr, CREATE_METHOD_TABLE(JSPromisePrototype) };
 
 /* Source for JSPromisePrototype.lut.h
 @begin promisePrototypeTable
-  then         JSBuiltin            DontEnum|Function 2
   catch        JSBuiltin            DontEnum|Function 1
   finally      JSBuiltin            DontEnum|Function 1
 @end
 */
 
-JSPromisePrototype* JSPromisePrototype::create(VM& vm, JSGlobalObject*, Structure* structure)
+JSPromisePrototype* JSPromisePrototype::create(VM& vm, JSGlobalObject* globalObject, Structure* structure)
 {
     JSPromisePrototype* object = new (NotNull, allocateCell<JSPromisePrototype>(vm.heap)) JSPromisePrototype(vm, structure);
-    object->finishCreation(vm, structure);
-    object->addOwnInternalSlots(vm, structure->globalObject());
+    object->finishCreation(vm, globalObject);
+    object->addOwnInternalSlots(vm, globalObject);
     return object;
 }
 
@@ -73,15 +66,16 @@ JSPromisePrototype::JSPromisePrototype(VM& vm, Structure* structure)
 {
 }
 
-void JSPromisePrototype::finishCreation(VM& vm, Structure*)
+void JSPromisePrototype::finishCreation(VM& vm, JSGlobalObject* globalObject)
 {
     Base::finishCreation(vm);
-    putDirectWithoutTransition(vm, vm.propertyNames->toStringTagSymbol, jsString(vm, "Promise"), PropertyAttribute::DontEnum | PropertyAttribute::ReadOnly);
+    putDirectWithoutTransition(vm, vm.propertyNames->builtinNames().thenPublicName(), globalObject->promiseProtoThenFunction(), static_cast<unsigned>(PropertyAttribute::DontEnum));
+    JSC_TO_STRING_TAG_WITHOUT_TRANSITION();
 }
 
 void JSPromisePrototype::addOwnInternalSlots(VM& vm, JSGlobalObject* globalObject)
 {
-    JSC_BUILTIN_FUNCTION_WITHOUT_TRANSITION(vm.propertyNames->builtinNames().thenPrivateName(), promisePrototypeThenCodeGenerator, PropertyAttribute::DontEnum | PropertyAttribute::DontDelete | PropertyAttribute::ReadOnly);
+    putDirectWithoutTransition(vm, vm.propertyNames->builtinNames().thenPrivateName(), globalObject->promiseProtoThenFunction(), PropertyAttribute::DontEnum | PropertyAttribute::DontDelete | PropertyAttribute::ReadOnly);
 }
 
 } // namespace JSC

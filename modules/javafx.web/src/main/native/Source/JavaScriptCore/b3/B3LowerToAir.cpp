@@ -29,15 +29,13 @@
 #if ENABLE(B3_JIT)
 
 #include "AirBlockInsertionSet.h"
-#include "AirCCallSpecial.h"
 #include "AirCode.h"
+#include "AirHelpers.h"
 #include "AirInsertionSet.h"
 #include "AirInstInlines.h"
 #include "AirPrintSpecial.h"
-#include "AirStackSlot.h"
 #include "B3ArgumentRegValue.h"
 #include "B3AtomicValue.h"
-#include "B3BasicBlockInlines.h"
 #include "B3BlockWorklist.h"
 #include "B3CCallValue.h"
 #include "B3CheckSpecial.h"
@@ -51,8 +49,8 @@
 #include "B3PhaseScope.h"
 #include "B3PhiChildren.h"
 #include "B3Procedure.h"
+#include "B3ProcedureInlines.h"
 #include "B3SlotBaseValue.h"
-#include "B3StackSlot.h"
 #include "B3UpsilonValue.h"
 #include "B3UseCounts.h"
 #include "B3ValueInlines.h"
@@ -61,9 +59,8 @@
 #include "B3WasmAddressValue.h"
 #include <wtf/IndexMap.h>
 #include <wtf/IndexSet.h>
-#include <wtf/ListDump.h>
 
-#if ASSERT_DISABLED
+#if !ASSERT_ENABLED
 IGNORE_RETURN_TYPE_WARNINGS_BEGIN
 #endif
 
@@ -72,13 +69,16 @@ namespace JSC { namespace B3 {
 namespace {
 
 namespace B3LowerToAirInternal {
-static const bool verbose = false;
+static constexpr bool verbose = false;
 }
 
 using Arg = Air::Arg;
 using Inst = Air::Inst;
 using Code = Air::Code;
 using Tmp = Air::Tmp;
+
+using Air::moveForType;
+using Air::relaxedMoveForType;
 
 // FIXME: We wouldn't need this if Air supported Width modifiers in Air::Kind.
 // https://bugs.webkit.org/show_bug.cgi?id=169247
@@ -142,7 +142,8 @@ public:
                 break;
             }
             case Get:
-            case Patchpoint: {
+            case Patchpoint:
+            case BottomTuple: {
                 if (value->type().isTuple())
                     ensureTupleTmps(value, m_tupleValueToTmps);
                 break;
@@ -155,10 +156,10 @@ public:
         for (B3::StackSlot* stack : m_procedure.stackSlots())
             m_stackToStack.add(stack, m_code.addStackSlot(stack));
         for (Variable* variable : m_procedure.variables()) {
-            auto addResult = m_variableToTmps.add(variable, Vector<Tmp, 1>(m_procedure.returnCount(variable->type())));
+            auto addResult = m_variableToTmps.add(variable, Vector<Tmp, 1>(m_procedure.resultCount(variable->type())));
             ASSERT(addResult.isNewEntry);
-            for (unsigned i = 0; i < m_procedure.returnCount(variable->type()); ++i)
-                addResult.iterator->value[i] = tmpForType(variable->type().isNumeric() ? variable->type() : m_procedure.extractFromTuple(variable->type(), i));
+            for (unsigned i = 0; i < m_procedure.resultCount(variable->type()); ++i)
+                addResult.iterator->value[i] = tmpForType(m_procedure.typeAtOffset(variable->type(), i));
         }
 
         // Figure out which blocks are not rare.
@@ -436,7 +437,8 @@ private:
 
         switch (tupleValue->opcode()) {
         case Phi:
-        case Patchpoint: {
+        case Patchpoint:
+        case BottomTuple: {
             return m_tupleValueToTmps.find(tupleValue)->value;
         }
         case Get:
@@ -531,7 +533,7 @@ private:
             return Arg::addr(tmp(address), offset);
         };
 
-        static const unsigned lotsOfUses = 10; // This is arbitrary and we should tune it eventually.
+        static constexpr unsigned lotsOfUses = 10; // This is arbitrary and we should tune it eventually.
 
         // Only match if the address value isn't used in some large number of places.
         if (m_useCounts.numUses(address) > lotsOfUses)
@@ -1173,62 +1175,6 @@ private:
         append(createStore(kind, memory->child(0), dest));
     }
 
-    Air::Opcode moveForType(Type type)
-    {
-        using namespace Air;
-        switch (type.kind()) {
-        case Int32:
-            return Move32;
-        case Int64:
-            RELEASE_ASSERT(is64Bit());
-            return Move;
-        case Float:
-            return MoveFloat;
-        case Double:
-            return MoveDouble;
-        case Void:
-        case Tuple:
-            break;
-        }
-        RELEASE_ASSERT_NOT_REACHED();
-        return Air::Oops;
-    }
-
-    Air::Opcode relaxedMoveForType(Type type)
-    {
-        using namespace Air;
-        switch (type.kind()) {
-        case Int32:
-        case Int64:
-            // For Int32, we could return Move or Move32. It's a trade-off.
-            //
-            // Move32: Using Move32 guarantees that we use the narrower move, but in cases where the
-            //     register allocator can't prove that the variables involved are 32-bit, this will
-            //     disable coalescing.
-            //
-            // Move: Using Move guarantees that the register allocator can coalesce normally, but in
-            //     cases where it can't prove that the variables are 32-bit and it doesn't coalesce,
-            //     this will force us to use a full 64-bit Move instead of the slightly cheaper
-            //     32-bit Move32.
-            //
-            // Coalescing is a lot more profitable than turning Move into Move32. So, it's better to
-            // use Move here because in cases where the register allocator cannot prove that
-            // everything is 32-bit, we still get coalescing.
-            return Move;
-        case Float:
-            // MoveFloat is always coalescable and we never convert MoveDouble to MoveFloat, so we
-            // should use MoveFloat when we know that the temporaries involved are 32-bit.
-            return MoveFloat;
-        case Double:
-            return MoveDouble;
-        case Void:
-        case Tuple:
-            break;
-        }
-        RELEASE_ASSERT_NOT_REACHED();
-        return Air::Oops;
-    }
-
 #if ENABLE(MASM_PROBE)
     template<typename... Arguments>
     void print(Arguments&&... arguments)
@@ -1644,28 +1590,28 @@ private:
             case NotEqual:
                 return createRelCond(MacroAssembler::NotEqual, MacroAssembler::DoubleNotEqualOrUnordered);
             case Equal:
-                return createRelCond(MacroAssembler::Equal, MacroAssembler::DoubleEqual);
+                return createRelCond(MacroAssembler::Equal, MacroAssembler::DoubleEqualAndOrdered);
             case LessThan:
-                return createRelCond(MacroAssembler::LessThan, MacroAssembler::DoubleLessThan);
+                return createRelCond(MacroAssembler::LessThan, MacroAssembler::DoubleLessThanAndOrdered);
             case GreaterThan:
-                return createRelCond(MacroAssembler::GreaterThan, MacroAssembler::DoubleGreaterThan);
+                return createRelCond(MacroAssembler::GreaterThan, MacroAssembler::DoubleGreaterThanAndOrdered);
             case LessEqual:
-                return createRelCond(MacroAssembler::LessThanOrEqual, MacroAssembler::DoubleLessThanOrEqual);
+                return createRelCond(MacroAssembler::LessThanOrEqual, MacroAssembler::DoubleLessThanOrEqualAndOrdered);
             case GreaterEqual:
-                return createRelCond(MacroAssembler::GreaterThanOrEqual, MacroAssembler::DoubleGreaterThanOrEqual);
+                return createRelCond(MacroAssembler::GreaterThanOrEqual, MacroAssembler::DoubleGreaterThanOrEqualAndOrdered);
             case EqualOrUnordered:
                 // The integer condition is never used in this case.
                 return createRelCond(MacroAssembler::Equal, MacroAssembler::DoubleEqualOrUnordered);
             case Above:
                 // We use a bogus double condition because these integer comparisons won't got down that
                 // path anyway.
-                return createRelCond(MacroAssembler::Above, MacroAssembler::DoubleEqual);
+                return createRelCond(MacroAssembler::Above, MacroAssembler::DoubleEqualAndOrdered);
             case Below:
-                return createRelCond(MacroAssembler::Below, MacroAssembler::DoubleEqual);
+                return createRelCond(MacroAssembler::Below, MacroAssembler::DoubleEqualAndOrdered);
             case AboveEqual:
-                return createRelCond(MacroAssembler::AboveOrEqual, MacroAssembler::DoubleEqual);
+                return createRelCond(MacroAssembler::AboveOrEqual, MacroAssembler::DoubleEqualAndOrdered);
             case BelowEqual:
-                return createRelCond(MacroAssembler::BelowOrEqual, MacroAssembler::DoubleEqual);
+                return createRelCond(MacroAssembler::BelowOrEqual, MacroAssembler::DoubleEqualAndOrdered);
             case BitAnd: {
                 Value* left = value->child(0);
                 Value* right = value->child(1);
@@ -2340,7 +2286,7 @@ private:
             failBlock = newBlock();
             failure = failBlock;
         }
-        Air::BasicBlock* strongFailBlock;
+        Air::BasicBlock* strongFailBlock = nullptr;
         if (isStrong && hasFence)
             strongFailBlock = newBlock();
         Air::FrequentedBlock comparisonFail = failure;
@@ -2749,7 +2695,7 @@ private:
                 return;
             }
 
-            if (m_value->child(1)->isInt(0xffffffff)) {
+            if (m_value->child(1)->isInt64(0xffffffff) || m_value->child(1)->isInt32(0xffffffff)) {
                 appendUnOp<Move32, Move32>(m_value->child(0));
                 return;
             }
@@ -3028,6 +2974,27 @@ private:
             RELEASE_ASSERT(m_value->opcode() == ConstFloat || isIdentical(m_value->asDouble(), 0.0));
             RELEASE_ASSERT(m_value->opcode() == ConstDouble || isIdentical(m_value->asFloat(), 0.0f));
             append(MoveZeroToDouble, tmp(m_value));
+            return;
+        }
+
+        case BottomTuple: {
+            forEachImmOrTmp(m_value, [&] (Arg tmp, Type type, unsigned) {
+                switch (type.kind()) {
+                case Void:
+                case Tuple:
+                    RELEASE_ASSERT_NOT_REACHED();
+                    break;
+                case Int32:
+                case Int64:
+                    ASSERT(Arg::isValidImmForm(0));
+                    append(Move, imm(static_cast<int64_t>(0)), tmp.tmp());
+                    break;
+                case Float:
+                case Double:
+                    append(MoveZeroToDouble, tmp.tmp());
+                    break;
+                }
+            });
             return;
         }
 
@@ -3740,7 +3707,7 @@ void lowerToAir(Procedure& procedure)
 
 } } // namespace JSC::B3
 
-#if ASSERT_DISABLED
+#if !ASSERT_ENABLED
 IGNORE_RETURN_TYPE_WARNINGS_END
 #endif
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2019 Apple Inc. All rights reserved.
+ * Copyright (C) 2018-2020 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -26,6 +26,8 @@
 #include "config.h"
 #include "JSCPtrTag.h"
 
+#include "JSCConfig.h"
+
 namespace JSC {
 
 #if CPU(ARM64E)
@@ -33,7 +35,7 @@ namespace JSC {
 static const char* tagForPtr(const void* ptr)
 {
 #define RETURN_NAME_IF_TAG_MATCHES(tag) \
-    if (WTF::untagCodePtrImpl<WTF::PtrTagAction::NoAssert>(ptr, JSC::tag) == removeCodePtrTag(ptr)) \
+    if (ptr == WTF::tagCodePtrImpl<WTF::PtrTagAction::NoAssert>(removeCodePtrTag(ptr), JSC::tag)) \
         return #tag;
     FOR_EACH_JSC_PTRTAG(RETURN_NAME_IF_TAG_MATCHES)
 #undef RETURN_NAME_IF_TAG_MATCHES
@@ -52,7 +54,8 @@ static const char* ptrTagName(PtrTag tag)
 
 void initializePtrTagLookup()
 {
-    static WTF::PtrTagLookup lookup = { tagForPtr, ptrTagName };
+    WTF::PtrTagLookup& lookup = g_jscConfig.ptrTagLookupRecord;
+    lookup.initialize(tagForPtr, ptrTagName);
     WTF::registerPtrTagLookup(&lookup);
 }
 

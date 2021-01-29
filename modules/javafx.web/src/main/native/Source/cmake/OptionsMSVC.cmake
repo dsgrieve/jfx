@@ -4,14 +4,16 @@ add_compile_options(
     /wd4309 /wd4344 /wd4355 /wd4389 /wd4396 /wd4456 /wd4457 /wd4458 /wd4459
     /wd4481 /wd4503 /wd4505 /wd4510 /wd4512 /wd4530 /wd4610 /wd4611 /wd4646
     /wd4702 /wd4706 /wd4722 /wd4800 /wd4819 /wd4951 /wd4952 /wd4996 /wd6011
-    /wd6031 /wd6211 /wd6246 /wd6255 /wd6387
+    /wd6031 /wd6211 /wd6246 /wd6255 /wd6387 /wd4091
 )
 
-# Create pdb files for debugging purposes, also for Release builds
-add_compile_options(/Zi /GS)
+if (NOT WTF_CPU_X86)
+    # Create pdb files for debugging purposes, also for Release builds
+    add_compile_options(/Zi /GS)
 
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG /OPT:ICF /OPT:REF")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /DEBUG /OPT:ICF /OPT:REF")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG /OPT:ICF /OPT:REF")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /DEBUG /OPT:ICF /OPT:REF")
+endif ()
 
 # We do not use exceptions
 add_definitions(-D_HAS_EXCEPTIONS=0)

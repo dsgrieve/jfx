@@ -11,6 +11,7 @@ list(APPEND WTF_PUBLIC_HEADERS
     java/JavaEnv.h
     java/JavaRef.h
     java/DbgUtils.h
+    java/JavaMath.h
     unicode/java/UnicodeJava.h
 )
 
@@ -92,6 +93,8 @@ elseif (UNIX)
     list(APPEND WTF_LIBRARIES rt)
 elseif (WIN32)
     list(APPEND WTF_SOURCES
+        generic/WorkQueueGeneric.cpp
+
         win/CPUTimeWin.cpp
         win/DbgHelperWin.cpp
         win/LanguageWin.cpp
@@ -99,9 +102,7 @@ elseif (WIN32)
         win/MemoryPressureHandlerWin.cpp
         win/OSAllocatorWin.cpp
         win/RunLoopWin.cpp
-        win/ThreadSpecificWin.cpp
         win/ThreadingWin.cpp
-        win/WorkQueueWin.cpp
     )
 
     list(APPEND WTF_PUBLIC_HEADERS
@@ -111,12 +112,6 @@ elseif (WIN32)
 
     list(APPEND WTF_LIBRARIES
         winmm
-    )
-endif ()
-
-if (${CMAKE_BUILD_TYPE} MATCHES "Debug" AND WIN32)
-    list(APPEND WTF_LIBRARIES
-        dbghelp
     )
 endif ()
 

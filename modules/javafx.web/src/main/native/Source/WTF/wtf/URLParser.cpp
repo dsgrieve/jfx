@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2018 Apple Inc. All rights reserved.
+ * Copyright (C) 2016-2019 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -29,7 +29,6 @@
 #include <array>
 #include <mutex>
 #include <unicode/uidna.h>
-#include <unicode/utf8.h>
 #include <unicode/utypes.h>
 
 namespace WTF {
@@ -239,7 +238,7 @@ static const uint8_t characterClassTable[256] = {
     UserInfo | ForbiddenHost, // '['
     UserInfo | SlashQuestionOrHash | ForbiddenHost, // '\\'
     UserInfo | ForbiddenHost, // ']'
-    UserInfo, // '^'
+    UserInfo | ForbiddenHost, // '^'
     0, // '_'
     UserInfo | Default, // '`'
     ValidScheme, // 'a'
@@ -412,7 +411,7 @@ template<typename CharacterType> ALWAYS_INLINE static bool isInUserInfoEncodeSet
 template<typename CharacterType> ALWAYS_INLINE static bool isPercentOrNonASCII(CharacterType character) { return !isASCII(character) || character == '%'; }
 template<typename CharacterType> ALWAYS_INLINE static bool isSlashQuestionOrHash(CharacterType character) { return character <= '\\' && characterClassTable[character] & SlashQuestionOrHash; }
 template<typename CharacterType> ALWAYS_INLINE static bool isValidSchemeCharacter(CharacterType character) { return character <= 'z' && characterClassTable[character] & ValidScheme; }
-template<typename CharacterType> ALWAYS_INLINE static bool isForbiddenHostCodePoint(CharacterType character) { return character <= ']' && characterClassTable[character] & ForbiddenHost; }
+template<typename CharacterType> ALWAYS_INLINE static bool isForbiddenHostCodePoint(CharacterType character) { return character <= '^' && characterClassTable[character] & ForbiddenHost; }
 ALWAYS_INLINE static bool shouldPercentEncodeQueryByte(uint8_t byte, const bool& urlIsSpecial)
 {
     if (characterClassTable[byte] & QueryPercent)
@@ -652,12 +651,11 @@ void URLParser::encodeNonUTF8Query(const Vector<UChar>& source, const URLTextEnc
 
 Optional<uint16_t> URLParser::defaultPortForProtocol(StringView scheme)
 {
-    static const uint16_t ftpPort = 21;
-    static const uint16_t gopherPort = 70;
-    static const uint16_t httpPort = 80;
-    static const uint16_t httpsPort = 443;
-    static const uint16_t wsPort = 80;
-    static const uint16_t wssPort = 443;
+    static constexpr uint16_t ftpPort = 21;
+    static constexpr uint16_t httpPort = 80;
+    static constexpr uint16_t httpsPort = 443;
+    static constexpr uint16_t wsPort = 80;
+    static constexpr uint16_t wssPort = 443;
 
     auto length = scheme.length();
     if (!length)
@@ -695,15 +693,6 @@ Optional<uint16_t> URLParser::defaultPortForProtocol(StringView scheme)
         default:
             return WTF::nullopt;
         }
-    case 'g':
-        if (length == 6
-            && scheme[1] == 'o'
-            && scheme[2] == 'p'
-            && scheme[3] == 'h'
-            && scheme[4] == 'e'
-            && scheme[5] == 'r')
-            return gopherPort;
-        return WTF::nullopt;
     case 'f':
         if (length == 3
             && scheme[1] == 't'
@@ -723,7 +712,6 @@ enum class Scheme {
     WSS,
     File,
     FTP,
-    Gopher,
     HTTP,
     HTTPS,
     NonSpecial
@@ -751,15 +739,6 @@ ALWAYS_INLINE static Scheme scheme(StringView scheme)
         default:
             return Scheme::NonSpecial;
         }
-    case 'g':
-        if (length == 6
-            && scheme[1] == 'o'
-            && scheme[2] == 'p'
-            && scheme[3] == 'h'
-            && scheme[4] == 'e'
-            && scheme[5] == 'r')
-            return Scheme::Gopher;
-        return Scheme::NonSpecial;
     case 'h':
         switch (length) {
         case 4:
@@ -932,7 +911,6 @@ void URLParser::copyURLPartsUntil(const URL& base, URLPart part, const CodePoint
         m_urlIsFile = true;
         FALLTHROUGH;
     case Scheme::FTP:
-    case Scheme::Gopher:
     case Scheme::HTTP:
     case Scheme::HTTPS:
         m_urlIsSpecial = true;
@@ -1182,7 +1160,7 @@ URLParser::URLParser(const String& input, const URL& base, const URLTextEncoding
         || (input.isAllSpecialCharacters<isC0ControlOrSpace>()
             && m_url.m_string == base.m_string.left(base.m_queryEnd)));
     ASSERT(internalValuesConsistent(m_url));
-#if !ASSERT_DISABLED
+#if ASSERT_ENABLED
     if (!m_didSeeSyntaxViolation) {
         // Force a syntax violation at the beginning to make sure we get the same result.
         URLParser parser(makeString(" ", input), base, nonUTF8QueryEncoding);
@@ -1190,7 +1168,7 @@ URLParser::URLParser(const String& input, const URL& base, const URLTextEncoding
         if (parsed.isValid())
             ASSERT(allValuesEqual(parser.result(), m_url));
     }
-#endif
+#endif // ASSERT_ENABLED
 }
 
 template<typename CharacterType>
@@ -1313,7 +1291,6 @@ void URLParser::parse(const CharacterType* input, const unsigned length, const U
                     m_url.m_protocolIsInHTTPFamily = true;
                     FALLTHROUGH;
                 case Scheme::FTP:
-                case Scheme::Gopher:
                     m_urlIsSpecial = true;
                     if (base.protocolIs(urlScheme))
                         state = State::SpecialRelativeOrAuthority;
@@ -2591,14 +2568,14 @@ template<typename CharacterType> Optional<URLParser::LCharBuffer> URLParser::dom
     int32_t numCharactersConverted = uidna_nameToASCII(&internationalDomainNameTranscoder(), StringView(domain).upconvertedCharacters(), domain.length(), hostnameBuffer, maxDomainLength, &processingDetails, &error);
 
     if (U_SUCCESS(error) && !processingDetails.errors) {
-#if ASSERT_DISABLED
-        UNUSED_PARAM(numCharactersConverted);
-#else
+#if ASSERT_ENABLED
         for (int32_t i = 0; i < numCharactersConverted; ++i) {
             ASSERT(isASCII(hostnameBuffer[i]));
             ASSERT(!isASCIIUpper(hostnameBuffer[i]));
         }
-#endif
+#else
+        UNUSED_PARAM(numCharactersConverted);
+#endif // ASSERT_ENABLED
         ascii.append(hostnameBuffer, numCharactersConverted);
         if (domain != StringView(ascii.data(), ascii.size()))
             syntaxViolation(iteratorForSyntaxViolationPosition);

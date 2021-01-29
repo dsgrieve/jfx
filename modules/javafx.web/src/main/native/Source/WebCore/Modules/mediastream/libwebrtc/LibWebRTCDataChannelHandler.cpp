@@ -56,7 +56,7 @@ static inline String fromStdString(const std::string& value)
     return String::fromUTF8(value.data(), value.length());
 }
 
-Ref<RTCDataChannelEvent> LibWebRTCDataChannelHandler::channelEvent(ScriptExecutionContext& context, rtc::scoped_refptr<webrtc::DataChannelInterface>&& dataChannel)
+Ref<RTCDataChannelEvent> LibWebRTCDataChannelHandler::channelEvent(Document& document, rtc::scoped_refptr<webrtc::DataChannelInterface>&& dataChannel)
 {
     auto protocol = dataChannel->protocol();
     auto label = dataChannel->label();
@@ -70,7 +70,7 @@ Ref<RTCDataChannelEvent> LibWebRTCDataChannelHandler::channelEvent(ScriptExecuti
     init.id = dataChannel->id();
 
     auto handler =  makeUnique<LibWebRTCDataChannelHandler>(WTFMove(dataChannel));
-    auto channel = RTCDataChannel::create(context, WTFMove(handler), fromStdString(label), WTFMove(init));
+    auto channel = RTCDataChannel::create(document, WTFMove(handler), fromStdString(label), WTFMove(init));
 
     return RTCDataChannelEvent::create(eventNames().datachannelEvent, Event::CanBubble::No, Event::IsCancelable::No, WTFMove(channel));
 }
@@ -89,15 +89,14 @@ void LibWebRTCDataChannelHandler::setClient(RTCDataChannelHandlerClient& client)
     checkState();
 }
 
-bool LibWebRTCDataChannelHandler::sendStringData(const String& text)
+bool LibWebRTCDataChannelHandler::sendStringData(const CString& utf8Text)
 {
-    auto utf8Text = text.utf8();
     return m_channel->Send({ rtc::CopyOnWriteBuffer(utf8Text.data(), utf8Text.length()), false });
 }
 
 bool LibWebRTCDataChannelHandler::sendRawData(const char* data, size_t length)
 {
-    return m_channel->Send({rtc::CopyOnWriteBuffer(data, length), true});
+    return m_channel->Send({ rtc::CopyOnWriteBuffer(data, length), true });
 }
 
 void LibWebRTCDataChannelHandler::close()
@@ -153,15 +152,12 @@ void LibWebRTCDataChannelHandler::OnMessage(const webrtc::DataBuffer& buffer)
     });
 }
 
-void LibWebRTCDataChannelHandler::OnBufferedAmountChange(uint64_t previousAmount)
+void LibWebRTCDataChannelHandler::OnBufferedAmountChange(uint64_t amount)
 {
     if (!m_client)
         return;
 
-    if (previousAmount <= m_channel->buffered_amount())
-        return;
-
-    callOnMainThread([protectedClient = makeRef(*m_client), amount = m_channel->buffered_amount()] {
+    callOnMainThread([protectedClient = makeRef(*m_client), amount] {
         protectedClient->bufferedAmountIsDecreasing(static_cast<size_t>(amount));
     });
 }

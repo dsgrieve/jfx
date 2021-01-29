@@ -34,10 +34,8 @@
 #include <wtf/text/StringBuilder.h>
 
 #if !OS(WINDOWS)
-#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #endif
 
 #if USE(GLIB)
@@ -125,11 +123,11 @@ String encodeForFileName(const String& inputString)
         if (shouldEscapeUChar(character, previousCharacter, nextCharacter)) {
             if (character <= 255) {
                 result.append('%');
-                appendByteAsHex(character, result);
+                result.append(hex(static_cast<unsigned char>(character), 2));
             } else {
                 result.appendLiteral("%+");
-                appendByteAsHex(character >> 8, result);
-                appendByteAsHex(character, result);
+                result.append(hex(static_cast<unsigned char>(character >> 8), 2));
+                result.append(hex(static_cast<unsigned char>(character), 2));
             }
         } else
             result.append(character);
@@ -182,8 +180,8 @@ String decodeFromFilename(const String& inputString)
         if (!isASCIIHexDigit(inputString[i + 5]))
             return { };
 
-        UChar hexDigit = toASCIIHexValue(inputString[i + 2], inputString[i + 3]) << 8 | toASCIIHexValue(inputString[i + 4], inputString[i + 5]);
-        result.append(hexDigit);
+        UChar encodedCharacter = toASCIIHexValue(inputString[i + 2], inputString[i + 3]) << 8 | toASCIIHexValue(inputString[i + 4], inputString[i + 5]);
+        result.append(encodedCharacter);
         i += 5;
     }
 
@@ -287,17 +285,17 @@ MappedFileData::~MappedFileData()
     unmapViewOfFile(m_fileData, m_fileSize);
 }
 
-#if HAVE(MMAP) && !PLATFORM(JAVA)
-
-MappedFileData::MappedFileData(const String& filePath, MappedFileMode mode, bool& success)
+MappedFileData::MappedFileData(const String& filePath, MappedFileMode mapMode, bool& success)
 {
-    auto fd = openFile(filePath, FileOpenMode::Read);
+    auto fd = openFile(filePath, FileSystem::FileOpenMode::Read);
 
-    success = mapFileHandle(fd, mode);
+    success = mapFileHandle(fd, FileSystem::FileOpenMode::Read, mapMode);
     closeFile(fd);
 }
 
-bool MappedFileData::mapFileHandle(PlatformFileHandle handle, MappedFileMode mode)
+#if HAVE(MMAP) && !PLATFORM(JAVA)
+
+bool MappedFileData::mapFileHandle(PlatformFileHandle handle, FileOpenMode openMode, MappedFileMode mapMode)
 {
     if (!isHandleValid(handle))
         return false;
@@ -307,7 +305,7 @@ bool MappedFileData::mapFileHandle(PlatformFileHandle handle, MappedFileMode mod
     auto* inputStream = g_io_stream_get_input_stream(G_IO_STREAM(handle));
     fd = g_file_descriptor_based_get_fd(G_FILE_DESCRIPTOR_BASED(inputStream));
 #else
-    // FIXME: openjfx2.26 compilation failure
+    // FIXME: jfx2.26 compilation failure
     // fd = handle;
 #endif
 
@@ -325,7 +323,24 @@ bool MappedFileData::mapFileHandle(PlatformFileHandle handle, MappedFileMode mod
         return true;
     }
 
-    void* data = mmap(0, size, PROT_READ, MAP_FILE | (mode == MappedFileMode::Shared ? MAP_SHARED : MAP_PRIVATE), fd, 0);
+    int pageProtection = PROT_READ;
+    switch (openMode) {
+    case FileOpenMode::Read:
+        pageProtection = PROT_READ;
+        break;
+    case FileOpenMode::Write:
+        pageProtection = PROT_WRITE;
+        break;
+    case FileOpenMode::ReadWrite:
+        pageProtection = PROT_READ | PROT_WRITE;
+        break;
+#if OS(DARWIN)
+    case FileOpenMode::EventsOnly:
+        ASSERT_NOT_REACHED();
+#endif
+    }
+
+    void* data = mmap(0, size, pageProtection, MAP_FILE | (mapMode == MappedFileMode::Shared ? MAP_SHARED : MAP_PRIVATE), fd, 0);
 
     if (data == MAP_FAILED) {
         return false;
